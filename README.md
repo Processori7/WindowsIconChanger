@@ -25,6 +25,7 @@
 - **Положение** — стрелки для точного сдвига или «Калибровка»: перетащите значок мышью прямо на панели задач.
 - Автозагрузка и скрытие в полноэкранных приложениях.
 - **Журнал** — галочка «Вести журнал работы» (по умолчанию **выключена**): пишет события программы в `%APPDATA%\IconsPo\iconspo.log` — пригодится для диагностики.
+- **Тема и язык** — кнопки «Тема: Тёмная/Светлая» и «Язык: Русский/English»: переключают оформление окна и переводят весь интерфейс (настройки, меню трея, подсказки). Выбор сохраняется в конфиге.
 
 ## Автозагрузка
 
@@ -123,6 +124,7 @@ This is a Windows limitation: only a signed UIAccess program (which needs a cert
 - **Position** — arrows for fine tuning, or "Calibration": drag the icon right on the taskbar.
 - Autostart at Windows logon and hiding in fullscreen apps.
 - **Log** — the "Keep a log" checkbox (off by default): writes app events to `%APPDATA%\IconsPo\iconspo.log` for diagnostics.
+- **Theme and language** — the "Theme: Dark/Light" and "Language: Russian/English" buttons switch the window theme and translate the whole interface (settings, tray menu, tooltips). The choice is saved in the config.
 
 ## Autostart
 

@@ -20,9 +20,11 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import traceback
 from ctypes import wintypes
+from string import Template
 
 from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QSize, QObject, QEvent
 from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QPainterPath, QColor,
@@ -42,7 +44,6 @@ except Exception:
 
 APP_NAME = "IconsPo"
 APP_TITLE = "IconsPo"
-APP_SUB = "Значок «Пуск» поверх панели задач"
 
 # ---------------------------------------------------------------- пути и файлы
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
@@ -63,6 +64,40 @@ PRESETS_DIR = os.path.join(ASSETS_DIR, "icons")
 PRESET_TITLES = {
     "star_wars": "Star Wars (Асока)",
 }
+PRESET_TITLES_EN = {
+    "star_wars": "Star Wars (Ahsoka)",
+}
+
+# ------------------------------------------------------------------ язык (i18n)
+_LANG = "ru"                    # текущий язык интерфейса: ru | en
+
+
+def set_lang(lang: str) -> None:
+    """Переключает язык интерфейса (выбор сохраняется в конфиге)."""
+    global _LANG
+    _LANG = "en" if str(lang or "").lower().startswith("en") else "ru"
+
+
+def tr(key: str) -> str:
+    """Строка интерфейса на текущем языке (с откатом на русскую)."""
+    table = STRINGS.get(_LANG) or STRINGS["ru"]
+    return table.get(key) or STRINGS["ru"].get(key) or key
+
+
+def preset_title(key: str) -> str:
+    base = str(key).replace("_", " ").title()
+    if _LANG == "en":
+        return PRESET_TITLES_EN.get(key, base)
+    return PRESET_TITLES.get(key, base)
+
+
+def init_lang_from_config() -> None:
+    """Читает язык из конфига заранее — до первых окон и диалогов."""
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
+            set_lang((json.load(f) or {}).get("lang", "ru"))
+    except Exception:
+        set_lang("ru")
 
 
 def preset_files() -> list:
@@ -72,10 +107,139 @@ def preset_files() -> list:
         for name in sorted(os.listdir(PRESETS_DIR)):
             if name.lower().endswith(".svg"):
                 key = os.path.splitext(name)[0]
-                out.append((key, PRESET_TITLES.get(key, key.replace("_", " ").title())))
+                out.append((key, preset_title(key)))
     except Exception:
         pass
     return out
+
+# ------------------------------------------------------------------- строки UI
+STRINGS = {
+    "ru": {
+        "app_sub": "Значок «Пуск» поверх панели задач",
+        "settings_title": "Настройки",
+        "tray_settings": "Настройки…",
+        "tray_quit": "Выход",
+        "status_init": "Инициализация…",
+        "status_disabled": "Значок выключен в настройках",
+        "status_calibration": "Калибровка: перетащите значок мышью на нужное место",
+        "status_fullscreen": "Скрыто: активно полноэкранное приложение",
+        "status_no_taskbar": "Панель задач не найдена",
+        "status_taskbar_hidden": "Панель задач скрыта (автоскрытие)",
+        "status_found": "Кнопка «Пуск» найдена автоматически · {w}×{h} px",
+        "status_found_approx": "Кнопка «Пуск» найдена приблизительно (нужна калибровка) · {w}×{h} px",
+        "close_tip": "Свернуть в трей",
+        "card_image": "Изображение значка",
+        "btn_pick": "Выбрать изображение…",
+        "btn_pick_tip": "Любая картинка или фото — они автоматически подгонятся под значок",
+        "btn_default": "Стандартный значок",
+        "default_icon_tip": "Стандартный значок",
+        "cap_presets": "Пресеты:",
+        "preset_tip_suffix": " — поставить этот значок",
+        "card_size": "Размер значка",
+        "auto": "Авто",
+        "card_shape": "Форма (для фото и картинок)",
+        "shape_rounded": "Скруглённый квадрат",
+        "shape_circle": "Круг",
+        "shape_square": "Квадрат",
+        "card_offset": "Положение",
+        "btn_reset": "Сброс",
+        "btn_calib": "Калибровка",
+        "btn_calib_tip": "Перетащите значок мышью на нужное место",
+        "card_behaviour": "Поведение",
+        "chk_enabled": "Показывать значок поверх кнопки «Пуск»",
+        "chk_autostart": "Запускать при входе в Windows",
+        "autostart_note_none": "Без реестра: задача Планировщика или ярлык «Автозагрузки»",
+        "autostart_note_task": "Способ: задача в Планировщике (надёжнее). Реестр не изменялся.",
+        "autostart_note_shortcut": "Способ: ярлык в папке «Автозагрузка». Реестр не изменялся.",
+        "chk_fullscreen": "Скрывать в полноэкранных приложениях",
+        "chk_log": "Вести журнал работы (для диагностики)",
+        "chk_log_tip": "Пишет события программы в %APPDATA%\\IconsPo\\iconspo.log",
+        "card_interface": "Интерфейс",
+        "theme_dark": "Тема: Тёмная",
+        "theme_light": "Тема: Светлая",
+        "lang_ru": "Язык: Русский",
+        "lang_en": "Язык: English",
+        "offset_label": "Сдвиг: {x}, {y}",
+        "err_autostart": "Не удалось изменить автозагрузку.\n",
+        "ask_autostart_text": "Как включить автозагрузку?",
+        "ask_autostart_info": (
+            "Надёжный способ — задача в Планировщике Windows: она переживает «чистки»\n"
+            "автозагрузки и стартует даже если ярлыки отключены.\n\n"
+            "Для создания задачи нужны права администратора — сейчас появится запрос UAC.\n\n"
+            "Можно и без прав: тогда будет использован ярлык в папке «Автозагрузка»."),
+        "ask_autostart_task_btn": "Через Планировщик (надёжнее)",
+        "ask_autostart_lnk_btn": "Обычный ярлык",
+        "dlg_pick_title": "Выберите изображение для значка",
+        "dlg_pick_filter": "Изображения (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;Все файлы (*.*)",
+        "err_file_not_found": "Файл не найден.",
+        "already_running": "IconsPo уже запущен.\nЗначок программы находится в трее (возле часов).",
+    },
+    "en": {
+        "app_sub": "Start icon over the taskbar",
+        "settings_title": "Settings",
+        "tray_settings": "Settings…",
+        "tray_quit": "Exit",
+        "status_init": "Starting…",
+        "status_disabled": "Icon is disabled in settings",
+        "status_calibration": "Calibration: drag the icon to the desired position",
+        "status_fullscreen": "Hidden: a fullscreen app is active",
+        "status_no_taskbar": "Taskbar not found",
+        "status_taskbar_hidden": "Taskbar is hidden (auto-hide)",
+        "status_found": "Start button found automatically · {w}×{h} px",
+        "status_found_approx": "Start button found approximately (calibration may be needed) · {w}×{h} px",
+        "close_tip": "Minimize to tray",
+        "card_image": "Icon image",
+        "btn_pick": "Choose image…",
+        "btn_pick_tip": "Any picture or photo — it will be fitted to the icon automatically",
+        "btn_default": "Default icon",
+        "default_icon_tip": "Default icon",
+        "cap_presets": "Presets:",
+        "preset_tip_suffix": " — set this icon",
+        "card_size": "Icon size",
+        "auto": "Auto",
+        "card_shape": "Shape (for photos and images)",
+        "shape_rounded": "Rounded square",
+        "shape_circle": "Circle",
+        "shape_square": "Square",
+        "card_offset": "Position",
+        "btn_reset": "Reset",
+        "btn_calib": "Calibrate",
+        "btn_calib_tip": "Drag the icon to the desired position",
+        "card_behaviour": "Behaviour",
+        "chk_enabled": "Show the icon over the Start button",
+        "chk_autostart": "Run at Windows logon",
+        "autostart_note_none": "Registry-free: a Task Scheduler task or a Startup shortcut",
+        "autostart_note_task": "Method: Task Scheduler task (more reliable). The registry was not modified.",
+        "autostart_note_shortcut": "Method: a shortcut in the Startup folder. The registry was not modified.",
+        "chk_fullscreen": "Hide in fullscreen apps",
+        "chk_log": "Keep a log (for diagnostics)",
+        "chk_log_tip": "Writes app events to %APPDATA%\\IconsPo\\iconspo.log",
+        "card_interface": "Interface",
+        "theme_dark": "Theme: Dark",
+        "theme_light": "Theme: Light",
+        "lang_ru": "Language: Russian",
+        "lang_en": "Language: English",
+        "offset_label": "Offset: {x}, {y}",
+        "err_autostart": "Could not change the autostart.\n",
+        "ask_autostart_text": "How to enable autostart?",
+        "ask_autostart_info": (
+            "The reliable way is a Windows Task Scheduler task: it survives startup-cleanup\n"
+            "tools and starts even when shortcuts are disabled.\n\n"
+            "Creating the task needs administrator rights — a UAC prompt will appear now.\n\n"
+            "You can also go without rights: a shortcut in the Startup folder will be used."),
+        "ask_autostart_task_btn": "Via Task Scheduler (more reliable)",
+        "ask_autostart_lnk_btn": "Plain shortcut",
+        "dlg_pick_title": "Choose an image for the icon",
+        "dlg_pick_filter": "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;All files (*.*)",
+        "err_file_not_found": "File not found.",
+        "already_running": "IconsPo is already running.\nThe app icon is in the system tray (near the clock).",
+    },
+}
+
+
+def offset_text(x, y) -> str:
+    return tr("offset_label").format(x=int(x), y=int(y))
+
 
 DEFAULT_CFG = {
     "image": "",            # путь к выбранной картинке ("" = стандартный SVG)
@@ -87,6 +251,8 @@ DEFAULT_CFG = {
     "autostart": False,
     "hide_fullscreen": True,
     "log": False,           # вести журнал работы (по умолчанию выключен)
+    "theme": "dark",        # оформление: dark | light
+    "lang": "ru",           # язык интерфейса: ru | en
     "history": [],          # галерея выбранных значков (свежие впереди)
 }
 
@@ -128,7 +294,7 @@ def app_log(text: str) -> None:
 def load_cfg() -> dict:
     cfg = dict(DEFAULT_CFG)
     try:
-        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        with open(CONFIG_PATH, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
         if isinstance(data, dict):
             for k in DEFAULT_CFG:
@@ -136,13 +302,13 @@ def load_cfg() -> dict:
                     cfg[k] = data[k]
     except Exception:
         pass
-    if cfg["image"] and not os.path.exists(cfg["image"]):
+    if cfg["image"] and not resolve_media(cfg["image"]):
         cfg["image"] = ""
     hist = cfg.get("history")
     if not isinstance(hist, list):
         hist = []
     cfg["history"] = [p for p in hist
-                      if isinstance(p, str) and (not p or os.path.exists(p))]
+                      if isinstance(p, str) and (not p or resolve_media(p))]
     return cfg
 
 
@@ -157,10 +323,34 @@ def save_cfg(cfg: dict) -> None:
         pass
 
 
+PRESET_PREFIX = "preset:"
+
+
+def preset_ref(key: str) -> str:
+    """Логическая ссылка на пресет: сам файл в AppData НЕ копируется."""
+    return PRESET_PREFIX + key
+
+
+def preset_asset(key: str) -> str:
+    return os.path.join(PRESETS_DIR, key + ".svg")
+
+
+def resolve_media(p: str) -> str:
+    """Запись конфига (путь к файлу или preset:<ключ>) — в реальный файл.
+
+    Возвращает путь к существующему файлу или "" (не найден).
+    """
+    p = str(p or "")
+    if p.startswith(PRESET_PREFIX):
+        asset = preset_asset(p[len(PRESET_PREFIX):])
+        return asset if os.path.exists(asset) else ""
+    return p if p and os.path.exists(p) else ""
+
+
 def current_source(cfg: dict) -> str:
-    """Текущий источник картинки: пользовательская или стандартный SVG."""
-    p = cfg.get("image") or ""
-    if p and os.path.exists(p):
+    """Текущий источник картинки: пользовательская, пресет или стандартный SVG."""
+    p = resolve_media(cfg.get("image") or "")
+    if p:
         return p
     return DEFAULT_SVG
 
@@ -705,112 +895,182 @@ class Overlay(QWidget):
 
 
 # ------------------------------------------------------------------- оформление
-QSS = """
+_PALETTES = {
+    "dark": {
+        "label": "#E8EBF1", "title": "#F4F6FB", "subtitle": "#8A92A6",
+        "caption": "#7C8497", "value": "#B9C1D4",
+        "root_bg": "#14151A", "root_border": "#272A33",
+        "card_bg": "#191B21", "card_border": "#242732",
+        "preview_bg": "#0D0F13", "preview_border": "#23262F",
+        "gal_bg": "#121419", "gal_border": "#262A34",
+        "gal_hover_bg": "#1A1E27", "gal_hover_border": "#363B48",
+        "gal_checked_bg": "#202A44",
+        "scroll_handle": "#2E3340", "scroll_hover": "#3A4050",
+        "btn_bg": "#1E2129", "btn_border": "#2C303B", "btn_text": "#E8EBF1",
+        "btn_hover_bg": "#252932", "btn_hover_border": "#363B48",
+        "btn_pressed": "#1A1D24", "btn_disabled": "#5C6373",
+        "accent": "#4C7DFF", "accent_hover": "#5D8BFF", "accent_pressed": "#3F6EE6",
+        "winbtn_text": "#9AA3B5", "winbtn_hover_bg": "#23262E", "winbtn_hover_text": "#FFFFFF",
+        "danger": "#E5484D",
+        "nudge_text": "#C6CDDB", "nudge_hover_bg": "#272B35",
+        "nudge_checked_bg": "#2A3350", "nudge_checked_text": "#AFC6FF",
+        "preset_checked_bg": "#232C44",
+        "combo_bg": "#1E2129", "combo_border": "#2C303B", "combo_text": "#E8EBF1",
+        "combo_view_bg": "#17191F", "combo_view_border": "#2A2E38", "combo_sel": "#262B36",
+        "slider_groove": "#30353F", "slider_handle_bg": "#E8EBF1", "slider_handle_hover": "#FFFFFF",
+        "slider_sub_disabled": "#3A3F4B", "slider_handle_disabled": "#6A7180",
+        "slider_handle_disabled_border": "#454B59",
+        "check_text": "#C9CFDB", "check_ind_bg": "#1A1D23", "check_ind_border": "#333845",
+        "menu_bg": "#17191F", "menu_border": "#2A2E38", "menu_text": "#E8EBF1",
+        "menu_sel": "#262B36", "menu_sep": "#262B36",
+        "tooltip_bg": "#17191F", "tooltip_text": "#E8EBF1", "tooltip_border": "#2A2E38",
+    },
+    "light": {
+        "label": "#2A2F3A", "title": "#14161B", "subtitle": "#6E7686",
+        "caption": "#79808F", "value": "#4E5563",
+        "root_bg": "#F4F5F8", "root_border": "#DCDFE6",
+        "card_bg": "#FBFCFE", "card_border": "#E4E7ED",
+        "preview_bg": "#EDEFF3", "preview_border": "#E1E5EB",
+        "gal_bg": "#F0F2F6", "gal_border": "#E2E5EB",
+        "gal_hover_bg": "#E7EAF0", "gal_hover_border": "#C9CFDA",
+        "gal_checked_bg": "#E3EAFF",
+        "scroll_handle": "#C6CBD4", "scroll_hover": "#AEB5C2",
+        "btn_bg": "#FFFFFF", "btn_border": "#D8DCE3", "btn_text": "#2A2F3A",
+        "btn_hover_bg": "#F3F5F9", "btn_hover_border": "#C6CCD6",
+        "btn_pressed": "#EAEDF2", "btn_disabled": "#A6ACB8",
+        "accent": "#4C7DFF", "accent_hover": "#5D8BFF", "accent_pressed": "#3F6EE6",
+        "winbtn_text": "#5A6172", "winbtn_hover_bg": "#E8EAEF", "winbtn_hover_text": "#14161B",
+        "danger": "#E5484D",
+        "nudge_text": "#3A404C", "nudge_hover_bg": "#EEF1F5",
+        "nudge_checked_bg": "#E1E9FF", "nudge_checked_text": "#3558C9",
+        "preset_checked_bg": "#E6EDFF",
+        "combo_bg": "#FFFFFF", "combo_border": "#D8DCE3", "combo_text": "#2A2F3A",
+        "combo_view_bg": "#FFFFFF", "combo_view_border": "#D8DCE3", "combo_sel": "#EEF1F5",
+        "slider_groove": "#D7DBE2", "slider_handle_bg": "#FFFFFF", "slider_handle_hover": "#EEF3FF",
+        "slider_sub_disabled": "#C9CED8", "slider_handle_disabled": "#C6CBD4",
+        "slider_handle_disabled_border": "#B9C0CC",
+        "check_text": "#3A404C", "check_ind_bg": "#FFFFFF", "check_ind_border": "#C9CFDA",
+        "menu_bg": "#FFFFFF", "menu_border": "#D8DCE3", "menu_text": "#2A2F3A",
+        "menu_sel": "#EEF1F5", "menu_sep": "#ECEEF2",
+        "tooltip_bg": "#FFFFFF", "tooltip_text": "#2A2F3A", "tooltip_border": "#D8DCE3",
+    },
+}
+
+_QSS_TEMPLATE = Template("""
 * { font-family: "Segoe UI", "Segoe UI Variable Text", sans-serif; }
-QLabel { color: #E8EBF1; }
-QLabel#Title { font-size: 15px; font-weight: 600; color: #F4F6FB; }
-QLabel#Subtitle { font-size: 11px; color: #8A92A6; }
-QLabel#CardCaption { font-size: 11px; color: #7C8497; }
-QLabel#Value { font-size: 11px; color: #B9C1D4; }
+QLabel { color: $label; }
+QLabel#Title { font-size: 15px; font-weight: 600; color: $title; }
+QLabel#Subtitle { font-size: 11px; color: $subtitle; }
+QLabel#CardCaption { font-size: 11px; color: $caption; }
+QLabel#Value { font-size: 11px; color: $value; }
 QWidget#TitleBar { background: transparent; }
 QFrame#Root {
-    background: #14151A;
-    border: 1px solid #272A33;
+    background: $root_bg;
+    border: 1px solid $root_border;
     border-radius: 14px;
 }
 QFrame#Card {
-    background: #191B21;
-    border: 1px solid #242732;
+    background: $card_bg;
+    border: 1px solid $card_border;
     border-radius: 12px;
 }
 QFrame#Preview {
-    background: #0D0F13;
-    border: 1px solid #23262F;
+    background: $preview_bg;
+    border: 1px solid $preview_border;
     border-radius: 12px;
 }
 QPushButton#Gallery {
-    background: #121419;
-    border: 1px solid #262A34;
+    background: $gal_bg;
+    border: 1px solid $gal_border;
     border-radius: 11px;
     padding: 4px;
 }
-QPushButton#Gallery:hover { background: #1A1E27; border-color: #363B48; }
-QPushButton#Gallery:checked { border: 1px solid #4C7DFF; background: #202A44; }
+QPushButton#Gallery:hover { background: $gal_hover_bg; border-color: $gal_hover_border; }
+QPushButton#Gallery:checked { border: 1px solid $accent; background: $gal_checked_bg; }
 QScrollArea#Gallery, QScrollArea#Gallery > QWidget > QWidget { background: transparent; border: none; }
 QScrollBar:horizontal { background: transparent; height: 6px; margin: 0 1px; }
-QScrollBar::handle:horizontal { background: #2E3340; border-radius: 3px; min-width: 28px; }
-QScrollBar::handle:horizontal:hover { background: #3A4050; }
+QScrollBar::handle:horizontal { background: $scroll_handle; border-radius: 3px; min-width: 28px; }
+QScrollBar::handle:horizontal:hover { background: $scroll_hover; }
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; height: 0; }
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal { background: transparent; }
 QPushButton {
-    background: #1E2129;
-    border: 1px solid #2C303B;
-    color: #E8EBF1;
+    background: $btn_bg;
+    border: 1px solid $btn_border;
+    color: $btn_text;
     border-radius: 9px;
     padding: 8px 14px;
     font-size: 12px;
 }
-QPushButton:hover { background: #252932; border-color: #363B48; }
-QPushButton:pressed { background: #1A1D24; }
-QPushButton:disabled { color: #5C6373; }
+QPushButton:hover { background: $btn_hover_bg; border-color: $btn_hover_border; }
+QPushButton:pressed { background: $btn_pressed; }
+QPushButton:disabled { color: $btn_disabled; }
 QPushButton#Accent {
-    background: #4C7DFF; border: 1px solid #4C7DFF; color: #FFFFFF; font-weight: 600;
+    background: $accent; border: 1px solid $accent; color: #FFFFFF; font-weight: 600;
 }
-QPushButton#Accent:hover { background: #5D8BFF; border-color: #5D8BFF; }
-QPushButton#Accent:pressed { background: #3F6EE6; }
+QPushButton#Accent:hover { background: $accent_hover; border-color: $accent_hover; }
+QPushButton#Accent:pressed { background: $accent_pressed; }
 QPushButton#WinBtn {
-    background: transparent; border: none; color: #9AA3B5;
+    background: transparent; border: none; color: $winbtn_text;
     border-radius: 7px; font-size: 13px; padding: 2px 10px;
 }
-QPushButton#WinBtn:hover { background: #23262E; color: #FFFFFF; }
-QPushButton#WinBtnClose:hover { background: #E5484D; color: #FFFFFF; }
+QPushButton#WinBtn:hover { background: $winbtn_hover_bg; color: $winbtn_hover_text; }
+QPushButton#WinBtnClose:hover { background: $danger; color: #FFFFFF; }
 QPushButton#Nudge {
-    background: #1E2129; border: 1px solid #2C303B; border-radius: 8px;
-    padding: 0px; font-size: 13px; color: #C6CDDB; min-width: 34px; min-height: 26px;
+    background: $btn_bg; border: 1px solid $btn_border; border-radius: 8px;
+    padding: 0px; font-size: 13px; color: $nudge_text; min-width: 34px; min-height: 26px;
 }
-QPushButton#Nudge:hover { background: #272B35; }
-QPushButton#Nudge:checked { background: #2A3350; border-color: #4C7DFF; color: #AFC6FF; }
+QPushButton#Nudge:hover { background: $nudge_hover_bg; }
+QPushButton#Nudge:checked { background: $nudge_checked_bg; border-color: $accent; color: $nudge_checked_text; }
 QPushButton#Small { padding: 5px 10px; font-size: 11px; }
 QPushButton#Preset { padding: 5px; border-radius: 10px; }
-QPushButton#Preset:checked { border-color: #4C7DFF; background: #232C44; }
+QPushButton#Preset:checked { border-color: $accent; background: $preset_checked_bg; }
 QComboBox {
-    background: #1E2129; border: 1px solid #2C303B; border-radius: 8px;
-    padding: 5px 10px; color: #E8EBF1; font-size: 12px; min-width: 150px;
+    background: $combo_bg; border: 1px solid $combo_border; border-radius: 8px;
+    padding: 5px 10px; color: $combo_text; font-size: 12px; min-width: 150px;
 }
-QComboBox:hover { border-color: #363B48; }
+QComboBox:hover { border-color: $btn_hover_border; }
 QComboBox QAbstractItemView {
-    background: #17191F; border: 1px solid #2A2E38; color: #E8EBF1;
-    selection-background-color: #262B36; outline: 0;
+    background: $combo_view_bg; border: 1px solid $combo_view_border; color: $combo_text;
+    selection-background-color: $combo_sel; outline: 0;
 }
-QSlider::groove:horizontal { height: 4px; background: #30353F; border-radius: 2px; }
-QSlider::sub-page:horizontal { background: #4C7DFF; border-radius: 2px; }
+QSlider::groove:horizontal { height: 4px; background: $slider_groove; border-radius: 2px; }
+QSlider::sub-page:horizontal { background: $accent; border-radius: 2px; }
 QSlider::handle:horizontal {
     width: 16px; height: 16px; margin: -7px 0; border-radius: 8px;
-    background: #E8EBF1; border: 2px solid #4C7DFF;
+    background: $slider_handle_bg; border: 2px solid $accent;
 }
-QSlider::handle:horizontal:hover { background: #FFFFFF; }
-QSlider::sub-page:horizontal:disabled { background: #3A3F4B; }
-QSlider::handle:horizontal:disabled { background: #6A7180; border-color: #454B59; }
-QCheckBox { color: #C9CFDB; font-size: 12px; spacing: 9px; }
+QSlider::handle:horizontal:hover { background: $slider_handle_hover; }
+QSlider::sub-page:horizontal:disabled { background: $slider_sub_disabled; }
+QSlider::handle:horizontal:disabled { background: $slider_handle_disabled; border-color: $slider_handle_disabled_border; }
+QCheckBox { color: $check_text; font-size: 12px; spacing: 9px; }
 QCheckBox::indicator {
     width: 18px; height: 18px; border-radius: 6px;
-    background: #1A1D23; border: 1px solid #333845;
+    background: $check_ind_bg; border: 1px solid $check_ind_border;
 }
-QCheckBox::indicator:hover { border-color: #4C7DFF; }
-QCheckBox::indicator:checked { background: #4C7DFF; border-color: #4C7DFF; }
+QCheckBox::indicator:hover { border-color: $accent; }
+QCheckBox::indicator:checked { background: $accent; border-color: $accent; }
 QMenu {
-    background: #17191F; border: 1px solid #2A2E38; border-radius: 8px;
-    padding: 6px; color: #E8EBF1; font-size: 12px;
+    background: $menu_bg; border: 1px solid $menu_border; border-radius: 8px;
+    padding: 6px; color: $menu_text; font-size: 12px;
 }
 QMenu::item { padding: 7px 26px 7px 12px; border-radius: 6px; }
-QMenu::item:selected { background: #262B36; }
-QMenu::separator { height: 1px; background: #262B36; margin: 6px 8px; }
-QMessageBox { background: #14151A; }
-QMessageBox QLabel { color: #E8EBF1; }
+QMenu::item:selected { background: $menu_sel; }
+QMenu::separator { height: 1px; background: $menu_sep; margin: 6px 8px; }
+QMessageBox { background: $root_bg; }
+QMessageBox QLabel { color: $label; }
 QToolTip {
-    background: #17191F; color: #E8EBF1; border: 1px solid #2A2E38; padding: 4px 8px;
+    background: $tooltip_bg; color: $tooltip_text; border: 1px solid $tooltip_border; padding: 4px 8px;
 }
-"""
+""")
+
+
+def build_qss(theme: str) -> str:
+    pal = _PALETTES.get(str(theme or "dark")) or _PALETTES["dark"]
+    return _QSS_TEMPLATE.substitute(**pal)
+
+
+def apply_qss(qt_app: QApplication, theme: str) -> None:
+    qt_app.setStyleSheet(build_qss(theme))
 
 
 # ---------------------------------------------------------------- окно настроек
@@ -845,18 +1105,17 @@ class SettingsWindow(QWidget):
         super().__init__(None, Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
         self.app = app
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setWindowTitle(APP_TITLE + " — Настройки")
+        self.setWindowTitle(APP_TITLE + " — " + tr("settings_title"))
         self.setFixedWidth(470)
         if os.path.exists(ICON_ICO):
             self.setWindowIcon(QIcon(ICON_ICO))
 
         root = QFrame(self)
         root.setObjectName("Root")
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(38)
-        shadow.setOffset(0, 8)
-        shadow.setColor(QColor(0, 0, 0, 170))
-        root.setGraphicsEffect(shadow)
+        self._shadow = QGraphicsDropShadowEffect(self)
+        self._shadow.setOffset(0, 8)
+        root.setGraphicsEffect(self._shadow)
+        self._apply_theme_ui()
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(20, 20, 20, 20)
@@ -877,8 +1136,10 @@ class SettingsWindow(QWidget):
         body.addWidget(self._build_size_card())
         body.addWidget(self._build_offset_card())
         body.addWidget(self._build_switches())
+        body.addWidget(self._build_interface_card())
         body.addStretch(1)
 
+        self.retranslate()
         self.refresh_preview()
         self.adjustSize()
         self.setFixedHeight(self.height())
@@ -900,10 +1161,10 @@ class SettingsWindow(QWidget):
         titles.setSpacing(0)
         t = QLabel(APP_TITLE)
         t.setObjectName("Title")
-        s = QLabel(APP_SUB)
-        s.setObjectName("Subtitle")
+        self.lbl_sub = QLabel(tr("app_sub"))
+        self.lbl_sub.setObjectName("Subtitle")
         titles.addWidget(t)
-        titles.addWidget(s)
+        titles.addWidget(self.lbl_sub)
         h.addLayout(titles)
         h.addStretch(1)
 
@@ -911,9 +1172,10 @@ class SettingsWindow(QWidget):
         btn_close.setObjectName("WinBtn")
         btn_close.setProperty("class", "close")
         btn_close.setFixedSize(30, 26)
-        btn_close.setToolTip("Свернуть в трей")
+        btn_close.setToolTip(tr("close_tip"))
         btn_close.clicked.connect(self.hide)
         h.addWidget(btn_close)
+        self.btn_close = btn_close
         return tb
 
     # -- предпросмотр ------------------------------------------------------------
@@ -968,7 +1230,7 @@ class SettingsWindow(QWidget):
             if p in seen:
                 continue
             seen.add(p)
-            if p and not os.path.exists(p):
+            if p and not resolve_media(p):
                 continue
             b = QPushButton()
             b.setObjectName("Gallery")
@@ -977,15 +1239,17 @@ class SettingsWindow(QWidget):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             b.setChecked(p == current)
             if not p:
-                tip = "Стандартный значок"
+                tip = tr("default_icon_tip")
+            elif p.startswith(PRESET_PREFIX):
+                tip = preset_title(p[len(PRESET_PREFIX):])
             else:
                 base = os.path.splitext(os.path.basename(p))[0]
                 if base.startswith("preset_"):
-                    tip = PRESET_TITLES.get(base[7:], base[7:].replace("_", " ").title())
+                    tip = preset_title(base[7:])
                 else:
                     tip = os.path.basename(p)
             b.setToolTip(tip)
-            pm = icon_pixmap(p or DEFAULT_SVG, 34,
+            pm = icon_pixmap(resolve_media(p) or DEFAULT_SVG, 34,
                              shape=self.app.cfg.get("shape", "rounded"))
             if pm is not None:
                 b.setIcon(QIcon(pm))
@@ -1001,18 +1265,18 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(9)
 
-        cap = QLabel("Изображение значка")
-        cap.setObjectName("CardCaption")
-        v.addWidget(cap)
+        self.cap_image = QLabel(tr("card_image"))
+        self.cap_image.setObjectName("CardCaption")
+        v.addWidget(self.cap_image)
 
         row = QHBoxLayout()
         row.setSpacing(8)
-        self.btn_pick = QPushButton("Выбрать изображение…")
+        self.btn_pick = QPushButton(tr("btn_pick"))
         self.btn_pick.setObjectName("Accent")
         self.btn_pick.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.btn_pick.setToolTip("Любая картинка или фото — они автоматически подгонятся под значок")
+        self.btn_pick.setToolTip(tr("btn_pick_tip"))
         self.btn_pick.clicked.connect(lambda: self.app.pick_image())
-        self.btn_reset = QPushButton("Стандартный значок")
+        self.btn_reset = QPushButton(tr("btn_default"))
         self.btn_reset.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_reset.clicked.connect(lambda: self.app.reset_image())
         row.addWidget(self.btn_pick, 1)
@@ -1021,9 +1285,9 @@ class SettingsWindow(QWidget):
 
         prow = QHBoxLayout()
         prow.setSpacing(8)
-        cap2 = QLabel("Пресеты:")
-        cap2.setObjectName("CardCaption")
-        prow.addWidget(cap2)
+        self.cap_presets = QLabel(tr("cap_presets"))
+        self.cap_presets.setObjectName("CardCaption")
+        prow.addWidget(self.cap_presets)
         self.preset_buttons = {}
         for key, tip in preset_files():
             b = QPushButton()
@@ -1031,7 +1295,7 @@ class SettingsWindow(QWidget):
             b.setCheckable(True)
             b.setFixedSize(44, 44)
             b.setCursor(Qt.CursorShape.PointingHandCursor)
-            b.setToolTip(tip + " — поставить этот значок")
+            b.setToolTip(tip + tr("preset_tip_suffix"))
             pm = icon_pixmap(os.path.join(PRESETS_DIR, key + ".svg"), 30)
             if pm is not None:
                 b.setIcon(QIcon(pm))
@@ -1051,11 +1315,11 @@ class SettingsWindow(QWidget):
         v.setSpacing(9)
 
         row = QHBoxLayout()
-        cap = QLabel("Размер значка")
-        cap.setObjectName("CardCaption")
-        row.addWidget(cap)
+        self.cap_size = QLabel(tr("card_size"))
+        self.cap_size.setObjectName("CardCaption")
+        row.addWidget(self.cap_size)
         row.addStretch(1)
-        self.lbl_size = QLabel("Авто")
+        self.lbl_size = QLabel(tr("auto"))
         self.lbl_size.setObjectName("Value")
         row.addWidget(self.lbl_size)
         v.addLayout(row)
@@ -1067,21 +1331,21 @@ class SettingsWindow(QWidget):
         self.slider.setPageStep(2)
         self.slider.valueChanged.connect(self._on_slider)
         row2.addWidget(self.slider, 1)
-        self.chk_auto = QCheckBox("Авто")
+        self.chk_auto = QCheckBox(tr("auto"))
         self.chk_auto.toggled.connect(self._on_auto)
         row2.addWidget(self.chk_auto)
         v.addLayout(row2)
 
         row3 = QHBoxLayout()
         row3.setSpacing(8)
-        cap3 = QLabel("Форма (для фото и картинок)")
-        cap3.setObjectName("CardCaption")
-        row3.addWidget(cap3)
+        self.cap_shape = QLabel(tr("card_shape"))
+        self.cap_shape.setObjectName("CardCaption")
+        row3.addWidget(self.cap_shape)
         row3.addStretch(1)
         self.cmb_shape = QComboBox()
-        self.cmb_shape.addItem("Скруглённый квадрат", "rounded")
-        self.cmb_shape.addItem("Круг", "circle")
-        self.cmb_shape.addItem("Квадрат", "square")
+        self.cmb_shape.addItem(tr("shape_rounded"), "rounded")
+        self.cmb_shape.addItem(tr("shape_circle"), "circle")
+        self.cmb_shape.addItem(tr("shape_square"), "square")
         self.cmb_shape.currentIndexChanged.connect(self._on_shape)
         row3.addWidget(self.cmb_shape)
         v.addLayout(row3)
@@ -1099,10 +1363,10 @@ class SettingsWindow(QWidget):
 
         left = QVBoxLayout()
         left.setSpacing(3)
-        cap = QLabel("Положение")
-        cap.setObjectName("CardCaption")
-        left.addWidget(cap)
-        self.lbl_off = QLabel("Сдвиг: 0, 0")
+        self.cap_offset = QLabel(tr("card_offset"))
+        self.cap_offset.setObjectName("CardCaption")
+        left.addWidget(self.cap_offset)
+        self.lbl_off = QLabel(offset_text(0, 0))
         self.lbl_off.setObjectName("Value")
         left.addWidget(self.lbl_off)
         left.addStretch(1)
@@ -1127,13 +1391,13 @@ class SettingsWindow(QWidget):
 
         col = QVBoxLayout()
         col.setSpacing(6)
-        self.btn_off_reset = QPushButton("Сброс")
+        self.btn_off_reset = QPushButton(tr("btn_reset"))
         self.btn_off_reset.setObjectName("Small")
         self.btn_off_reset.clicked.connect(lambda: self.app.reset_offset())
-        self.btn_calib = QPushButton("Калибровка")
+        self.btn_calib = QPushButton(tr("btn_calib"))
         self.btn_calib.setObjectName("Small")
         self.btn_calib.setCheckable(True)
-        self.btn_calib.setToolTip("Перетащите значок мышью на нужное место")
+        self.btn_calib.setToolTip(tr("btn_calib_tip"))
         self.btn_calib.toggled.connect(lambda on: self.app.set_calibration(on))
         col.addWidget(self.btn_off_reset)
         col.addWidget(self.btn_calib)
@@ -1149,30 +1413,113 @@ class SettingsWindow(QWidget):
         v.setContentsMargins(14, 12, 14, 12)
         v.setSpacing(10)
 
-        cap = QLabel("Поведение")
-        cap.setObjectName("CardCaption")
-        v.addWidget(cap)
+        self.cap_behaviour = QLabel(tr("card_behaviour"))
+        self.cap_behaviour.setObjectName("CardCaption")
+        v.addWidget(self.cap_behaviour)
 
-        self.chk_enabled = QCheckBox("Показывать значок поверх кнопки «Пуск»")
+        self.chk_enabled = QCheckBox(tr("chk_enabled"))
         self.chk_enabled.toggled.connect(lambda b: self.app.set_enabled(b))
         v.addWidget(self.chk_enabled)
 
-        self.chk_autostart = QCheckBox("Запускать при входе в Windows")
+        self.chk_autostart = QCheckBox(tr("chk_autostart"))
         self.chk_autostart.toggled.connect(self._on_autostart)
         v.addWidget(self.chk_autostart)
-        self.lbl_autostart_note = QLabel("Без реестра: задача Планировщика или ярлык «Автозагрузки»")
+        self.lbl_autostart_note = QLabel(tr("autostart_note_none"))
         self.lbl_autostart_note.setObjectName("Hint")
         v.addWidget(self.lbl_autostart_note)
 
-        self.chk_fullscreen = QCheckBox("Скрывать в полноэкранных приложениях")
+        self.chk_fullscreen = QCheckBox(tr("chk_fullscreen"))
         self.chk_fullscreen.toggled.connect(lambda b: self.app.set_hide_fullscreen(b))
         v.addWidget(self.chk_fullscreen)
 
-        self.chk_log = QCheckBox("Вести журнал работы (для диагностики)")
-        self.chk_log.setToolTip("Пишет события программы в %APPDATA%\\IconsPo\\iconspo.log")
+        self.chk_log = QCheckBox(tr("chk_log"))
+        self.chk_log.setToolTip(tr("chk_log_tip"))
         self.chk_log.toggled.connect(lambda b: self.app.set_log_enabled(b))
         v.addWidget(self.chk_log)
         return card
+
+    def _build_interface_card(self) -> QFrame:
+        card = QFrame()
+        card.setObjectName("Card")
+        v = QVBoxLayout(card)
+        v.setContentsMargins(14, 12, 14, 12)
+        v.setSpacing(9)
+
+        self.cap_interface = QLabel(tr("card_interface"))
+        self.cap_interface.setObjectName("CardCaption")
+        v.addWidget(self.cap_interface)
+
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        self.btn_theme = QPushButton()
+        self.btn_theme.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_theme.clicked.connect(self._on_theme)
+        self.btn_lang = QPushButton()
+        self.btn_lang.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_lang.clicked.connect(self._on_lang)
+        row.addWidget(self.btn_theme)
+        row.addWidget(self.btn_lang)
+        row.addStretch(1)
+        v.addLayout(row)
+        return card
+
+    def _apply_theme_ui(self):
+        """Тень окна подбирается под текущую тему."""
+        try:
+            if str(self.app.cfg.get("theme") or "dark") == "light":
+                self._shadow.setBlurRadius(30)
+                self._shadow.setColor(QColor(0, 0, 0, 70))
+            else:
+                self._shadow.setBlurRadius(38)
+                self._shadow.setColor(QColor(0, 0, 0, 170))
+        except Exception:
+            pass
+
+    def _on_theme(self):
+        cur = str(self.app.cfg.get("theme") or "dark")
+        self.app.set_theme("light" if cur != "light" else "dark")
+
+    def _on_lang(self):
+        cur = str(self.app.cfg.get("lang") or "ru")
+        self.app.set_language("ru" if cur != "ru" else "en")
+
+    def retranslate(self):
+        """Переводит все подписи окна на текущий язык (без перезапуска)."""
+        self.setWindowTitle(APP_TITLE + " — " + tr("settings_title"))
+        self.lbl_sub.setText(tr("app_sub"))
+        self.btn_close.setToolTip(tr("close_tip"))
+        self.cap_image.setText(tr("card_image"))
+        self.cap_presets.setText(tr("cap_presets"))
+        self.cap_size.setText(tr("card_size"))
+        self.cap_shape.setText(tr("card_shape"))
+        self.cap_offset.setText(tr("card_offset"))
+        self.cap_behaviour.setText(tr("card_behaviour"))
+        self.cap_interface.setText(tr("card_interface"))
+        self.btn_pick.setText(tr("btn_pick"))
+        self.btn_pick.setToolTip(tr("btn_pick_tip"))
+        self.btn_reset.setText(tr("btn_default"))
+        self.btn_off_reset.setText(tr("btn_reset"))
+        self.btn_calib.setText(tr("btn_calib"))
+        self.btn_calib.setToolTip(tr("btn_calib_tip"))
+        self.chk_auto.setText(tr("auto"))
+        self.cmb_shape.setItemText(0, tr("shape_rounded"))
+        self.cmb_shape.setItemText(1, tr("shape_circle"))
+        self.cmb_shape.setItemText(2, tr("shape_square"))
+        self.chk_enabled.setText(tr("chk_enabled"))
+        self.chk_autostart.setText(tr("chk_autostart"))
+        self.chk_fullscreen.setText(tr("chk_fullscreen"))
+        self.chk_log.setText(tr("chk_log"))
+        self.chk_log.setToolTip(tr("chk_log_tip"))
+        theme = str(self.app.cfg.get("theme") or "dark")
+        self.btn_theme.setText(tr("theme_light") if theme == "light" else tr("theme_dark"))
+        lang = str(self.app.cfg.get("lang") or "ru")
+        self.btn_lang.setText(tr("lang_en") if lang == "en" else tr("lang_ru"))
+        for key, tip in preset_files():
+            if key in self.preset_buttons:
+                self.preset_buttons[key].setToolTip(tip + tr("preset_tip_suffix"))
+        self.sync_from_cfg()
+        self.refresh_preview()
+        self._update_autostart_note()
 
     # -- обработчики --------------------------------------------------------------
     def _on_slider(self, v: int):
@@ -1188,7 +1535,7 @@ class SettingsWindow(QWidget):
             self.slider.blockSignals(True)
             self.slider.setValue(self.app.auto_size())
             self.slider.blockSignals(False)
-            self.lbl_size.setText("Авто")
+            self.lbl_size.setText(tr("auto"))
             self.app.set_size(0)
         else:
             v = self.slider.value()
@@ -1201,20 +1548,17 @@ class SettingsWindow(QWidget):
             self.chk_autostart.blockSignals(True)
             self.chk_autostart.setChecked(not checked)
             self.chk_autostart.blockSignals(False)
-            QMessageBox.warning(self, APP_TITLE, "Не удалось изменить автозагрузку.\n" + err)
+            QMessageBox.warning(self, APP_TITLE, tr("err_autostart") + err)
         self._update_autostart_note()
 
     def _update_autostart_note(self):
         state = autostart_state()
         if state == "task":
-            self.lbl_autostart_note.setText(
-                "Способ: задача в Планировщике (надёжнее). Реестр не изменялся.")
+            self.lbl_autostart_note.setText(tr("autostart_note_task"))
         elif state == "shortcut":
-            self.lbl_autostart_note.setText(
-                "Способ: ярлык в папке «Автозагрузка». Реестр не изменялся.")
+            self.lbl_autostart_note.setText(tr("autostart_note_shortcut"))
         else:
-            self.lbl_autostart_note.setText(
-                "Без реестра: задача Планировщика или ярлык «Автозагрузки»")
+            self.lbl_autostart_note.setText(tr("autostart_note_none"))
 
     # -- синхронизация с конфигом ---------------------------------------------------
     def refresh_preview(self):
@@ -1234,14 +1578,14 @@ class SettingsWindow(QWidget):
         auto = int(cfg["size"] or 0) == 0
         self.slider.setValue(self.app.auto_size() if auto else int(cfg["size"]))
         self.chk_auto.setChecked(auto)
-        self.lbl_size.setText("Авто" if auto else f"{int(cfg['size'])} px")
+        self.lbl_size.setText(tr("auto") if auto else f"{int(cfg['size'])} px")
         idx = self.cmb_shape.findData(str(cfg.get("shape") or "rounded"))
         if idx >= 0:
             self.cmb_shape.setCurrentIndex(idx)
         img = str(cfg.get("image") or "")
         for key, btn in self.preset_buttons.items():
-            btn.setChecked(img == self.app.preset_path(key))
-        self.lbl_off.setText(f"Сдвиг: {int(cfg['offset_x'])}, {int(cfg['offset_y'])}")
+            btn.setChecked(img == preset_ref(key))
+        self.lbl_off.setText(offset_text(cfg["offset_x"], cfg["offset_y"]))
         for w in widgets:
             w.blockSignals(False)
         self._update_autostart_note()
@@ -1505,6 +1849,7 @@ class App(QObject):
         self.qt_app = qt_app
         self.first_run = not os.path.exists(CONFIG_PATH)
         self.cfg = load_cfg()
+        set_lang(self.cfg.get("lang") or "ru")
         self.cfg["autostart"] = autostart_state() != "none"
         save_cfg(self.cfg)
         set_logging(bool(self.cfg.get("log")))
@@ -1517,7 +1862,7 @@ class App(QObject):
         self.overlay = Overlay(on_calibrated=self._on_calibrated)
         self.locator = StartLocator()
         self.settings: SettingsWindow | None = None
-        self.status = "Инициализация…"
+        self.status = tr("status_init")
         self.base_center: QPoint | None = None
         self.last_geo: QRect | None = None
         self._btn_key = None
@@ -1527,13 +1872,13 @@ class App(QObject):
         self._shown_geo: QRect | None = None   # чтобы зря не дёргать setGeometry
 
         self.tray = QSystemTrayIcon(self._build_tray_icon(), self)
-        self.tray.setToolTip(APP_TITLE + " — " + APP_SUB)
+        self.tray.setToolTip(APP_TITLE + " — " + tr("app_sub"))
         menu = QMenu()
-        act_set = menu.addAction("Настройки…")
-        act_set.triggered.connect(self.open_settings)
+        self.act_set = menu.addAction(tr("tray_settings"))
+        self.act_set.triggered.connect(self.open_settings)
         menu.addSeparator()
-        act_quit = menu.addAction("Выход")
-        act_quit.triggered.connect(self.quit)
+        self.act_quit = menu.addAction(tr("tray_quit"))
+        self.act_quit.triggered.connect(self.quit)
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self._on_tray)
         self.tray.show()
@@ -1570,6 +1915,37 @@ class App(QObject):
         except Exception:
             pass
 
+    def set_theme(self, theme: str):
+        """Переключает тёмное/светлое оформление, выбор сохраняется."""
+        theme = "light" if str(theme) == "light" else "dark"
+        self.cfg["theme"] = theme
+        save_cfg(self.cfg)
+        app_log("тема: " + theme)
+        apply_qss(self.qt_app, theme)
+        if self.settings is not None:
+            self.settings._apply_theme_ui()
+            self.settings.retranslate()
+
+    def set_language(self, lang: str):
+        """Переключает язык интерфейса, выбор сохраняется."""
+        set_lang(lang)
+        self.cfg["lang"] = _LANG
+        save_cfg(self.cfg)
+        app_log("язык: " + _LANG)
+        self.retranslate()
+        self.tick()
+
+    def retranslate(self):
+        """Обновляет тексты трея и настроек после смены языка."""
+        try:
+            self.act_set.setText(tr("tray_settings"))
+            self.act_quit.setText(tr("tray_quit"))
+            self.tray.setToolTip(APP_TITLE + " — " + (self.status or tr("app_sub")))
+        except Exception:
+            pass
+        if self.settings is not None:
+            self.settings.retranslate()
+
     def _on_tray(self, reason):
         if reason in (QSystemTrayIcon.ActivationReason.Trigger,
                       QSystemTrayIcon.ActivationReason.DoubleClick):
@@ -1589,13 +1965,12 @@ class App(QObject):
     def pick_image(self):
         parent = self.settings
         path, _ = QFileDialog.getOpenFileName(
-            parent, "Выберите изображение для значка", "",
-            "Изображения (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;Все файлы (*.*)")
+            parent, tr("dlg_pick_title"), "", tr("dlg_pick_filter"))
         if not path:
             return
         path = os.path.abspath(path)
         if not os.path.isfile(path):
-            QMessageBox.warning(parent, APP_TITLE, "Файл не найден.")
+            QMessageBox.warning(parent, APP_TITLE, tr("err_file_not_found"))
             return
         # Картинка не копируется — используется прямо из своей папки
         self.cfg["image"] = path
@@ -1615,22 +1990,14 @@ class App(QObject):
             self.settings.refresh_preview()
         self.tick()
 
-    def preset_path(self, key: str) -> str:
-        return os.path.join(APPDATA_DIR, f"preset_{key}.svg")
-
     def apply_preset(self, key: str):
-        src = os.path.join(PRESETS_DIR, key + ".svg")
-        if not os.path.exists(src):
+        """Ставит значок-пресет. В AppData ничего не копируется: в конфиге
+        хранится логическая ссылка preset:<ключ>, файл берётся из assets."""
+        if not os.path.exists(preset_asset(key)):
             return
-        ensure_appdata()
-        dest = self.preset_path(key)
-        try:
-            shutil.copyfile(src, dest)
-        except Exception as ex:
-            QMessageBox.warning(self.settings, APP_TITLE, f"Не удалось скопировать значок:\n{ex}")
-            return
-        self.cfg["image"] = dest
-        self._remember(dest)
+        ref = preset_ref(key)
+        self.cfg["image"] = ref
+        self._remember(ref)
         app_log("пресет: " + key)
         self.overlay._key = None
         if self.settings is not None:
@@ -1659,7 +2026,7 @@ class App(QObject):
 
     def set_image_from_history(self, path: str):
         """Переключает значок на картинку, выбранную ранее."""
-        if path and not os.path.exists(path):
+        if path and not resolve_media(path):
             return
         self.cfg["image"] = path
         self._remember(path)
@@ -1688,7 +2055,7 @@ class App(QObject):
         save_cfg(self.cfg)
         app_log("размер: %d px" % int(value) if int(value) > 0 else "размер: авто")
         if self.settings is not None:
-            self.settings.lbl_off.setText(f"Сдвиг: {self.cfg['offset_x']}, {self.cfg['offset_y']}")
+            self.settings.lbl_off.setText(offset_text(self.cfg['offset_x'], self.cfg['offset_y']))
         self.tick()
 
     def nudge(self, dx: int, dy: int):
@@ -1697,7 +2064,7 @@ class App(QObject):
         save_cfg(self.cfg)
         app_log("сдвиг: %d, %d" % (int(self.cfg["offset_x"]), int(self.cfg["offset_y"])))
         if self.settings is not None:
-            self.settings.lbl_off.setText(f"Сдвиг: {self.cfg['offset_x']}, {self.cfg['offset_y']}")
+            self.settings.lbl_off.setText(offset_text(self.cfg['offset_x'], self.cfg['offset_y']))
         self.tick()
 
     def reset_offset(self):
@@ -1706,7 +2073,7 @@ class App(QObject):
         save_cfg(self.cfg)
         app_log("сдвиг: 0, 0")
         if self.settings is not None:
-            self.settings.lbl_off.setText("Сдвиг: 0, 0")
+            self.settings.lbl_off.setText(offset_text(0, 0))
         self.tick()
 
     def set_enabled(self, enabled: bool):
@@ -1760,14 +2127,10 @@ class App(QObject):
         box = QMessageBox(self.settings)
         box.setWindowTitle(APP_TITLE)
         box.setIcon(QMessageBox.Icon.Question)
-        box.setText("Как включить автозагрузку?")
-        box.setInformativeText(
-            "Надёжный способ — задача в Планировщике Windows: она переживает «чистки»\n"
-            "автозагрузки и стартует даже если ярлыки отключены.\n\n"
-            "Для создания задачи нужны права администратора — сейчас появится запрос UAC.\n\n"
-            "Можно и без прав: тогда будет использован ярлык в папке «Автозагрузка».")
-        b_task = box.addButton("Через Планировщик (надёжнее)", QMessageBox.ButtonRole.AcceptRole)
-        b_lnk = box.addButton("Обычный ярлык", QMessageBox.ButtonRole.RejectRole)
+        box.setText(tr("ask_autostart_text"))
+        box.setInformativeText(tr("ask_autostart_info"))
+        b_task = box.addButton(tr("ask_autostart_task_btn"), QMessageBox.ButtonRole.AcceptRole)
+        b_lnk = box.addButton(tr("ask_autostart_lnk_btn"), QMessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(b_task)
         box.exec()
         return box.clickedButton() is b_task
@@ -1787,7 +2150,7 @@ class App(QObject):
         save_cfg(self.cfg)
         app_log("калибровка: сдвиг %d, %d" % (self.cfg["offset_x"], self.cfg["offset_y"]))
         if self.settings is not None:
-            self.settings.lbl_off.setText(f"Сдвиг: {self.cfg['offset_x']}, {self.cfg['offset_y']}")
+            self.settings.lbl_off.setText(offset_text(self.cfg['offset_x'], self.cfg['offset_y']))
 
     # -- основной цикл -------------------------------------------------------------
     def tick(self):
@@ -1800,26 +2163,26 @@ class App(QObject):
     def _tick_impl(self):
         if not self.cfg["enabled"]:
             self.overlay.hide()
-            self._set_status("Значок выключен в настройках")
+            self._set_status(tr("status_disabled"))
             return
         if self.overlay.calibration:
             self.overlay.show()
             self.overlay._interactive_topmost()
-            self._set_status("Калибровка: перетащите значок мышью на нужное место")
+            self._set_status(tr("status_calibration"))
             return
         if self.cfg["hide_fullscreen"] and foreground_is_fullscreen():
             self.overlay.hide()
-            self._set_status("Скрыто: активно полноэкранное приложение")
+            self._set_status(tr("status_fullscreen"))
             return
         res = self.locator.locate()
         if res is None:
             self.overlay.hide()
-            self._set_status("Панель задач не найдена")
+            self._set_status(tr("status_no_taskbar"))
             return
         phys, offscreen = res
         if offscreen:
             self.overlay.hide()
-            self._set_status("Панель задач скрыта (автоскрытие)")
+            self._set_status(tr("status_taskbar_hidden"))
             return
         log = physical_to_logical(phys)
         if log is None:
@@ -1854,8 +2217,10 @@ class App(QObject):
             self.overlay.show()                    # showEvent сам поднимет поверх всех
         else:
             self.overlay._raise_now()              # панель задач любит залезать при кликах
-        src_txt = "автоматически" if self.locator.source == "uia" else "приблизительно (нужна калибровка)"
-        self._set_status(f"Кнопка «Пуск» найдена {src_txt} · {log.width()}×{log.height()} px")
+        if self.locator.source == "uia":
+            self._set_status(tr("status_found").format(w=log.width(), h=log.height()))
+        else:
+            self._set_status(tr("status_found_approx").format(w=log.width(), h=log.height()))
 
     def _measure_icon_center(self, phys: QRect):
         """Уточняет центр значка и цвет панели под кнопкой (кэш до смены геометрии)."""
@@ -2004,7 +2369,7 @@ def _selftest_gallery(ctrl: App, win, count: int = 8) -> list:
         if not os.path.exists(src):
             src = DEFAULT_SVG
         for i in range(count):
-            dest = os.path.join(APPDATA_DIR, f"picked_selftest{i}.svg")
+            dest = os.path.join(tempfile.gettempdir(), f"iconspo_selftest_{i}.svg")
             shutil.copyfile(src, dest)
             files.append(dest)
             ctrl.set_image_from_history(dest)
@@ -2099,6 +2464,7 @@ def main() -> int:
     selftest = "--selftest" in args
     autostart_run = "--autostart" in args
 
+    init_lang_from_config()
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(2)
     except Exception:
@@ -2109,18 +2475,16 @@ def main() -> int:
     qt_app.setApplicationName(APP_NAME)
     qt_app.setStyle("Fusion")
     qt_app.setFont(QFont("Segoe UI", 9))
-    qt_app.setStyleSheet(QSS)
     if os.path.exists(ICON_ICO):
         qt_app.setWindowIcon(QIcon(ICON_ICO))
 
     if not selftest and not single_instance_acquire():
         if not autostart_run:
-            QMessageBox.information(
-                None, APP_TITLE,
-                "IconsPo уже запущен.\nЗначок программы находится в трее (возле часов).")
+            QMessageBox.information(None, APP_TITLE, tr("already_running"))
         return 0
 
     ctrl = App(qt_app)
+    apply_qss(qt_app, ctrl.cfg.get("theme", "dark"))
     if selftest:
         out_dir = os.getcwd()
         QTimer.singleShot(150, lambda: run_selftest(qt_app, ctrl, out_dir))
