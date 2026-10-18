@@ -1,0 +1,23 @@
+# --- виртуальное окружение и кэши Python ---
+venv/
+.venv/
+__pycache__/
+*.pyc
+
+# --- результаты сборки Nuitka ---
+dist/
+build/
+*.build/
+*.dist/
+*.onefile-build/
+nuitka-crash-report.xml
+
+# --- артефакты самопроверки (создаются при запуске с --selftest) ---
+selftest_*.png
+selftest_report.json
+
+# --- прочее ---
+*.log
+*.old
+.vscode/
+.idea/

@@ -1,0 +1,5 @@
+# IconsPo — дополнительно для сборки одного exe (см. README, «Сборка одного exe»)
+-r requirements.txt
+nuitka>=4.3
+zstandard>=0.22
+Pillow>=10
