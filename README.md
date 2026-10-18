@@ -1,4 +1,4 @@
-# IconsPo
+# WinIcons
 
 **Автор:** ProcessorI7 · **Сайт:** https://github.com/Processori7/ · Первая версия программы (1.0)
 
@@ -71,20 +71,20 @@ venv\Scripts\python -m nuitka --onefile --enable-plugin=pyside6 ^
   --include-package=comtypes --include-package=uiautomation --include-package-data=uiautomation ^
   --company-name=ProcessorI7 ^
   --copyright="(c) ProcessorI7 - https://github.com/Processori7/" ^
-  --file-description="IconsPo 1.0 - a custom picture over the Start button (no registry changes)" ^
+  --file-description="WinIcons 1.0 - a custom picture over the Start button (no registry changes)" ^
   --nofollow-import-to=PIL ^
-  --output-dir=dist --output-filename=IconsPo.exe ^
-  --product-name=IconsPo --file-version=1.0.0.0 --product-version=1.0.0.0 ^
+  --output-dir=dist --output-filename=WinIcons.exe ^
+  --product-name=WinIcons --file-version=1.0.0.0 --product-version=1.0.0.0 ^
   --assume-yes-for-downloads --remove-output main.py
 ```
 
-Результат: `dist\IconsPo.exe` — один файл, ничего дополнительно не требует.
+Результат: `dist\WinIcons.exe` — один файл, ничего дополнительно не требует.
 Под картинку подкладывается цвет панели задач, поэтому сквозь прозрачные места значка не просвечивает настоящий логотип.
 
 ## Самопроверка
 
 ```powershell
-venv\Scripts\python main.py --selftest     # или dist\IconsPo.exe --selftest
+venv\Scripts\python main.py --selftest     # или dist\WinIcons.exe --selftest
 ```
 
 Создаёт в текущей папке `selftest_report.json` и скриншоты `selftest_before/after/settings.png`.
@@ -97,7 +97,7 @@ venv\Scripts\python main.py --selftest     # или dist\IconsPo.exe --selftest
 
 ---
 
-# IconsPo (English)
+# WinIcons (English)
 
 **Author:** ProcessorI7 · **Website:** https://github.com/Processori7/ · First release (1.0)
 
@@ -170,20 +170,20 @@ venv\Scripts\python -m nuitka --onefile --enable-plugin=pyside6 ^
   --include-package=comtypes --include-package=uiautomation --include-package-data=uiautomation ^
   --company-name=ProcessorI7 ^
   --copyright="(c) ProcessorI7 - https://github.com/Processori7/" ^
-  --file-description="IconsPo 1.0 - a custom picture over the Start button (no registry changes)" ^
+  --file-description="WinIcons 1.0 - a custom picture over the Start button (no registry changes)" ^
   --nofollow-import-to=PIL ^
-  --output-dir=dist --output-filename=IconsPo.exe ^
-  --product-name=IconsPo --file-version=1.0.0.0 --product-version=1.0.0.0 ^
+  --output-dir=dist --output-filename=WinIcons.exe ^
+  --product-name=WinIcons --file-version=1.0.0.0 --product-version=1.0.0.0 ^
   --assume-yes-for-downloads --remove-output main.py
 ```
 
-The result is `dist\IconsPo.exe` — a single file with no extra dependencies.
+The result is `dist\WinIcons.exe` — a single file with no extra dependencies.
 The taskbar colour is placed under your picture, so the original logo does not show through transparent areas.
 
 ## Self-check
 
 ```powershell
-venv\Scripts\python main.py --selftest     # or dist\IconsPo.exe --selftest
+venv\Scripts\python main.py --selftest     # or dist\WinIcons.exe --selftest
 ```
 
 Writes `selftest_report.json` and the screenshots `selftest_before/after/settings.png` into the current folder.

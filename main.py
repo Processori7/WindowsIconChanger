@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-IconsPo — накладывает выбранную картинку поверх кнопки «Пуск» в Windows.
+WinIcons — накладывает выбранную картинку поверх кнопки «Пуск» в Windows.
 
 Принцип работы: поверх кнопки «Пуск» на панели задач отображается маленькое
 прозрачное окно-оверлей с вашим изображением. Клики проходят «сквозь» него.
@@ -43,7 +43,7 @@ except Exception:
     _HAS_UIA = False
 
 APP_NAME = "IconsPo"
-APP_TITLE = "IconsPo"
+APP_TITLE = "WinIcons"
 
 # ---------------------------------------------------------------- пути и файлы
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
@@ -172,7 +172,7 @@ STRINGS = {
         "dlg_pick_title": "Выберите изображение для значка",
         "dlg_pick_filter": "Изображения (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;Все файлы (*.*)",
         "err_file_not_found": "Файл не найден.",
-        "already_running": "IconsPo уже запущен.\nЗначок программы находится в трее (возле часов).",
+        "already_running": "WinIcons уже запущен.\nЗначок программы находится в трее (возле часов).",
     },
     "en": {
         "app_sub": "Start icon over the taskbar",
@@ -232,7 +232,7 @@ STRINGS = {
         "dlg_pick_title": "Choose an image for the icon",
         "dlg_pick_filter": "Images (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.svg);;All files (*.*)",
         "err_file_not_found": "File not found.",
-        "already_running": "IconsPo is already running.\nThe app icon is in the system tray (near the clock).",
+        "already_running": "WinIcons is already running.\nThe app icon is in the system tray (near the clock).",
     },
 }
 
