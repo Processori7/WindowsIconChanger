@@ -1,6 +1,6 @@
 # WinIcons
 
-**Автор:** ProcessorI7 · **Сайт:** https://github.com/Processori7/ · Первая версия программы (1.0)
+**Автор:** ProcessorI7 · **Сайт:** https://github.com/Processori7/ · Версия 1.1 — исправление: значок «Пуск» на всех мониторах
 
 Программа для Windows: накладывает **вашу картинку поверх кнопки «Пуск»** на панели задач.
 
@@ -8,6 +8,7 @@
 - **Реестр не изменяется.**
 - Значок виден поверх панели задач и обычных окон и сам возвращается после взаимодействий с оболочкой (меню «Пуск», поиск) — см. «Известное ограничение».
 - Живёт в трее: **ЛКМ** — настройки, **ПКМ** — меню `Настройки…` / `Выход`. Состояние (найдена ли кнопка «Пуск») видно в подсказке значка трея.
+- При выключении или перезагрузке Windows программа закрывается сама — сеанс завершается без задержки.
 
 ## Известное ограничение
 
@@ -71,10 +72,10 @@ venv\Scripts\python -m nuitka --onefile --enable-plugin=pyside6 ^
   --include-package=comtypes --include-package=uiautomation --include-package-data=uiautomation ^
   --company-name=ProcessorI7 ^
   --copyright="(c) ProcessorI7 - https://github.com/Processori7/" ^
-  --file-description="WinIcons 1.0 - a custom picture over the Start button (no registry changes)" ^
+  --file-description="WinIcons 1.1 - a custom picture over the Start button (no registry changes)" ^
   --nofollow-import-to=PIL ^
   --output-dir=dist --output-filename=WinIcons.exe ^
-  --product-name=WinIcons --file-version=1.0.0.0 --product-version=1.0.0.0 ^
+  --product-name=WinIcons --file-version=1.1.0.0 --product-version=1.1.0.0 ^
   --assume-yes-for-downloads --remove-output main.py
 ```
 
@@ -99,7 +100,7 @@ venv\Scripts\python main.py --selftest     # или dist\WinIcons.exe --selftest
 
 # WinIcons (English)
 
-**Author:** ProcessorI7 · **Website:** https://github.com/Processori7/ · First release (1.0)
+**Author:** ProcessorI7 · **Website:** https://github.com/Processori7/ · Version 1.1 — bugfix: the Start icon on all monitors
 
 A Windows app that draws **your picture over the Start button** on the taskbar.
 
@@ -107,6 +108,7 @@ A Windows app that draws **your picture over the Start button** on the taskbar.
 - **The registry is never modified.**
 - The icon stays on top of the taskbar and normal windows and restores itself after shell interactions (Start menu, search) — see "Known limitation".
 - Lives in the system tray: **left click** — settings, **right click** — menu (`Settings…` / `Exit`). The tray tooltip shows the current state (whether the Start button was found).
+- On Windows shutdown or restart the app closes itself cleanly — the session ends without delay.
 
 ## Known limitation
 
@@ -170,10 +172,10 @@ venv\Scripts\python -m nuitka --onefile --enable-plugin=pyside6 ^
   --include-package=comtypes --include-package=uiautomation --include-package-data=uiautomation ^
   --company-name=ProcessorI7 ^
   --copyright="(c) ProcessorI7 - https://github.com/Processori7/" ^
-  --file-description="WinIcons 1.0 - a custom picture over the Start button (no registry changes)" ^
+  --file-description="WinIcons 1.1 - a custom picture over the Start button (no registry changes)" ^
   --nofollow-import-to=PIL ^
   --output-dir=dist --output-filename=WinIcons.exe ^
-  --product-name=WinIcons --file-version=1.0.0.0 --product-version=1.0.0.0 ^
+  --product-name=WinIcons --file-version=1.1.0.0 --product-version=1.1.0.0 ^
   --assume-yes-for-downloads --remove-output main.py
 ```
 

@@ -26,7 +26,8 @@ import traceback
 from ctypes import wintypes
 from string import Template
 
-from PySide6.QtCore import Qt, QTimer, QRect, QRectF, QPoint, QSize, QObject, QEvent
+from PySide6.QtCore import (Qt, QTimer, QRect, QRectF, QPoint, QSize, QObject, QEvent,
+                            QAbstractNativeEventFilter)
 from PySide6.QtGui import (QIcon, QImage, QPixmap, QPainter, QPainterPath, QColor,
                            QPen, QFont, QAction)
 from PySide6.QtSvg import QSvgRenderer
@@ -44,6 +45,7 @@ except Exception:
 
 APP_NAME = "IconsPo"
 APP_TITLE = "WinIcons"
+APP_VERSION = "1.1"
 
 # ---------------------------------------------------------------- пути и файлы
 APPDATA_DIR = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
@@ -127,6 +129,9 @@ STRINGS = {
         "status_taskbar_hidden": "Панель задач скрыта (автоскрытие)",
         "status_found": "Кнопка «Пуск» найдена автоматически · {w}×{h} px",
         "status_found_approx": "Кнопка «Пуск» найдена приблизительно (нужна калибровка) · {w}×{h} px",
+        "status_found_multi": "Кнопка «Пуск» найдена автоматически на всех панелях задач ({n}) · {w}×{h} px",
+        "status_found_approx_multi": "Кнопка «Пуск» найдена приблизительно на всех панелях задач ({n}) · {w}×{h} px",
+        "status_partial": "Кнопка «Пуск» найдена на части панелей задач ({n} из {total})",
         "close_tip": "Свернуть в трей",
         "card_image": "Изображение значка",
         "btn_pick": "Выбрать изображение…",
@@ -187,6 +192,9 @@ STRINGS = {
         "status_taskbar_hidden": "Taskbar is hidden (auto-hide)",
         "status_found": "Start button found automatically · {w}×{h} px",
         "status_found_approx": "Start button found approximately (calibration may be needed) · {w}×{h} px",
+        "status_found_multi": "Start button found automatically on all taskbars ({n}) · {w}×{h} px",
+        "status_found_approx_multi": "Start button found approximately on all taskbars ({n}) · {w}×{h} px",
+        "status_partial": "Start button found on some taskbars ({n} of {total})",
         "close_tip": "Minimize to tray",
         "card_image": "Icon image",
         "btn_pick": "Choose image…",
@@ -416,6 +424,58 @@ def get_monitor_info(hwnd: int) -> MONITORINFO:
     return mi
 
 
+# Явные типы: HMONITOR — это дескриптор-указатель, без restype ctypes обрежет
+# его до 32 бит.
+user32.MonitorFromWindow.restype = wintypes.HANDLE
+user32.MonitorFromWindow.argtypes = (wintypes.HWND, wintypes.DWORD)
+user32.GetMonitorInfoW.restype = wintypes.BOOL
+user32.GetMonitorInfoW.argtypes = (wintypes.HANDLE, ctypes.POINTER(MONITORINFO))
+
+
+def get_monitor_info_hmon(hmon) -> MONITORINFO:
+    """Информация о мониторе по его дескриптору (HMONITOR)."""
+    mi = MONITORINFO()
+    mi.cbSize = ctypes.sizeof(MONITORINFO)
+    user32.GetMonitorInfoW(wintypes.HANDLE(int(hmon)), ctypes.byref(mi))
+    return mi
+
+
+def enum_taskbars() -> list:
+    """Панели задач: основная (Shell_TrayWnd) и дополнительные — по одной
+    на каждый монитор (Shell_SecondaryTrayWnd)."""
+    hwnds = []
+    try:
+        h = int(user32.FindWindowW("Shell_TrayWnd", None) or 0)
+        if h:
+            hwnds.append(h)
+    except Exception:
+        pass
+    try:
+        user32.FindWindowExW.restype = wintypes.HWND
+        prev = 0
+        while True:
+            h = int(user32.FindWindowExW(wintypes.HWND(0), wintypes.HWND(prev),
+                                         "Shell_SecondaryTrayWnd", None) or 0)
+            if not h:
+                break
+            hwnds.append(h)
+            prev = h
+    except Exception:
+        pass
+    return hwnds
+
+
+def monitor_rect_for(hwnd: int) -> QRect:
+    """Физический прямоугольник монитора, на котором находится окно."""
+    try:
+        mi = get_monitor_info(hwnd)
+        m = mi.rcMonitor
+        return QRect(int(m.left), int(m.top),
+                     int(m.right - m.left), int(m.bottom - m.top))
+    except Exception:
+        return QRect()
+
+
 # Окна оболочки Windows: могут быть во весь экран, но значок поверх них нужен
 SHELL_WINDOW_CLASSES = {"Shell_TrayWnd", "Shell_SecondaryTrayWnd", "Progman", "WorkerW",
                         "XamlExplorerHostIslandWindow", "Windows.UI.Core.CoreWindow"}
@@ -438,7 +498,7 @@ def foreground_is_fullscreen() -> bool:
     («Пуск», поиск, рабочий стол) полноэкранными не считаются никогда.
     """
     h = int(user32.GetForegroundWindow() or 0)
-    if not h or h == get_taskbar_hwnd():
+    if not h or h in enum_taskbars():
         return False
     if get_window_class(h) in SHELL_WINDOW_CLASSES:
         return False
@@ -473,45 +533,101 @@ START_NAMES = {
 
 
 class StartLocator:
-    """Ищет кнопку «Пуск» (UIAutomation), есть эвристический запасной вариант."""
+    """Ищет кнопку «Пуск» на каждой панели задач (по одной на монитор).
+
+    Основной способ — UIAutomation; запасной — анализ пикселей панели.
+    Результаты кэшируются отдельно для каждой панели (по её дескриптору).
+    """
 
     def __init__(self):
-        self._btn = None
-        self.source = "none"   # uia | heuristic | none
+        self._btns = {}        # hwnd панели -> элемент UIA кнопки «Пуск»
+        self._fails = {}       # hwnd панели -> подряд неудачных попыток UIA
+        self._heur = {}        # hwnd панели -> (QRect панели, QRect кнопки)
+        self.source = "none"   # uia | heuristic | none (по последнему поиску)
         self.last_error = ""
-        self._uia_fails = 0
+        self.hide_overlays = None   # callable(): спрятать значки перед снимком
 
     # -- публичный интерфейс ---------------------------------------------------
-    def locate(self):
-        """Возвращает (QRect в физических пикселях, offscreen: bool) или None."""
-        if _HAS_UIA and self._uia_fails < 3:
-            try:
-                if self._btn is None:
-                    self._btn = self._find_via_uia()
-                if self._btn is not None:
-                    r = self._btn.BoundingRectangle
-                    w = int(r.right - r.left)
-                    h = int(r.bottom - r.top)
-                    if w > 8 and h > 8:
-                        self.source = "uia"
-                        return QRect(int(r.left), int(r.top), w, h), bool(self._btn.IsOffscreen)
-            except Exception as ex:
-                # UIAutomation недоступна (например, в сборке нет comtypes) —
-                # после нескольких попыток переходим на эвристику, без спама
-                self._btn = None
-                self._uia_fails += 1
-                self.last_error = f"{type(ex).__name__}: {ex}"[:200]
-        return self._fallback()
+    def invalidate(self) -> None:
+        """Сбросить кэши (например, при смене экранов)."""
+        self._heur.clear()
+
+    def wants_pixels(self) -> bool:
+        """True, если для поиска понадобится снимок экрана (эвристика)."""
+        for hwnd in enum_taskbars():
+            if _HAS_UIA and self._fails.get(hwnd, 0) < 3:
+                continue
+            r = get_window_rect(hwnd)
+            if not r:
+                continue
+            tb = QRect(int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+            cached = self._heur.get(hwnd)
+            if cached is None or cached[0] != tb:
+                return True
+        return False
+
+    def locate_all(self) -> list:
+        """Список словарей: hwnd, rect (физ. пиксели), offscreen, source."""
+        found = []
+        for hwnd in enum_taskbars():
+            r = get_window_rect(hwnd)
+            if not r:
+                continue
+            tb = QRect(int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
+            if tb.width() < 20 or tb.height() < 20:
+                continue
+            item = self._locate_one(hwnd, tb)
+            if item is not None:
+                found.append(item)
+        if not found:
+            self.source = "none"
+        elif any(i["source"] == "heuristic" for i in found):
+            self.source = "heuristic"
+        else:
+            self.source = "uia"
+        return found
+
+    # -- одна панель -----------------------------------------------------------
+    def _locate_one(self, hwnd: int, tb: QRect):
+        if _HAS_UIA and self._fails.get(hwnd, 0) < 3:
+            rect = self._via_uia(hwnd)
+            if rect is not None:
+                return {"hwnd": hwnd, "rect": rect[0], "offscreen": rect[1], "source": "uia"}
+        rect = self._fallback(hwnd, tb)
+        if rect is None:
+            return None
+        return {"hwnd": hwnd, "rect": rect, "offscreen": False, "source": "heuristic"}
 
     # -- UIAutomation ----------------------------------------------------------
-    def _find_via_uia(self):
+    def _via_uia(self, hwnd: int):
+        try:
+            btn = self._btns.get(hwnd)
+            if btn is None:
+                btn = self._find_via_uia(hwnd)
+                if btn is None:      # кнопка не нашлась — тоже считаем попытку
+                    self._fails[hwnd] = self._fails.get(hwnd, 0) + 1
+                self._btns[hwnd] = btn
+            if btn is None:
+                return None
+            r = btn.BoundingRectangle
+            w = int(r.right - r.left)
+            h = int(r.bottom - r.top)
+            if w <= 8 or h <= 8:
+                return None
+            return QRect(int(r.left), int(r.top), w, h), bool(btn.IsOffscreen)
+        except Exception as ex:
+            # UIAutomation недоступна (например, в сборке нет comtypes) —
+            # после нескольких попыток переходим на эвристику, без спама
+            self._btns[hwnd] = None
+            self._fails[hwnd] = self._fails.get(hwnd, 0) + 1
+            self.last_error = f"{type(ex).__name__}: {ex}"[:200]
+            return None
+
+    def _find_via_uia(self, hwnd: int):
         try:
             auto.SetGlobalSearchTimeout(1.0)
         except Exception:
             pass
-        hwnd = get_taskbar_hwnd()
-        if not hwnd:
-            return None
         taskbar = auto.ControlFromHandle(hwnd)
         if taskbar is None:
             return None
@@ -531,54 +647,175 @@ class StartLocator:
         return None
 
     # -- эвристика -------------------------------------------------------------
-    def _fallback(self):
-        hwnd = get_taskbar_hwnd()
-        if not hwnd:
-            return None
-        r = get_window_rect(hwnd)
-        if not r:
-            return None
-        tb = QRect(int(r.left), int(r.top), int(r.right - r.left), int(r.bottom - r.top))
-        if tb.width() < 20 or tb.height() < 20:
-            return None
-        self.source = "heuristic"
+    def _fallback(self, hwnd: int, tb: QRect):
+        """Пиксельный поиск кнопки «Пуск» на панели задач. Кэшируется, пока
+        панель не переехала."""
+        cached = self._heur.get(hwnd)
+        if cached is not None and cached[0] == tb:
+            return cached[1]
         if tb.height() >= tb.width():  # панель задач сбоку
             h = tb.width()
-            return QRect(tb.left(), tb.top(), h, int(h * 1.15)), False
+            rect = QRect(tb.left(), tb.top(), h, int(h * 1.15))
+            self._heur[hwnd] = (tb, rect)
+            return rect
         h = tb.height()
-        # ищем первый значок слева по пикселям — обычно это и есть «Пуск»
-        scr = QApplication.primaryScreen()
-        if scr is not None:
+        rect = None
+        if self.hide_overlays:      # значки не должны попасть в снимок
             try:
-                img = scr.grabWindow(0).toImage()
-                found = find_first_taskbar_icon(img, tb)
+                self.hide_overlays()
+            except Exception:
+                pass
+        grab = ScreenGrab.capture(hwnd)
+        if grab is not None:
+            try:
+                found = find_start_icon(grab.img, grab.to_img(tb))
             except Exception:
                 found = None
             if found is not None:
                 p, _bg = found
-                return QRect(p.x() - h // 2, tb.top(), h, h), False
-        # последний резерв: системная кнопка «Пуск»
-        win11 = sys.getwindowsversion().build >= 22000
-        if win11:
-            sw = int(user32.GetSystemMetrics(0))   # ширина основного экрана, физ. пиксели
-            cx = max(tb.left() + h, min(tb.right() - h, sw // 2 - 96))
-            return QRect(int(cx - h / 2), tb.top(), h, h), False
-        return QRect(tb.left(), tb.top(), int(h * 1.15), h), False
-
-
-def physical_to_logical(rect: QRect) -> QRect | None:
-    """Перевод физических координат (UIA/WinAPI) в логические координаты Qt."""
-    scr = QApplication.primaryScreen()
-    if scr is None:
-        return None
-    dpr = float(scr.devicePixelRatio() or 1.0)
-    if abs(dpr - 1.0) < 1e-6:
+                pc = grab.to_phys_point(p)
+                rect = QRect(pc.x() - h // 2, tb.top(), h, h)
+        if rect is None:
+            # последний резерв: системная кнопка «Пуск» на этом мониторе
+            mon = monitor_rect_for(hwnd)
+            if mon.width() < 16:
+                mon = tb
+            win11 = sys.getwindowsversion().build >= 22000
+            if win11:
+                cx = max(tb.left() + h, min(tb.right() - h, mon.center().x() - 2 * h))
+                rect = QRect(int(cx - h / 2), tb.top(), h, h)
+            else:
+                rect = QRect(tb.left(), tb.top(), int(h * 1.15), h)
+        self._heur[hwnd] = (tb, rect)
         return rect
-    return QRect(round(rect.x() / dpr), round(rect.y() / dpr),
-                 round(rect.width() / dpr), round(rect.height() / dpr))
+
+
+# ------------------------------------------------- масштаб и карта мониторов
+def screen_native_handle(screen) -> int:
+    """HMONITOR экрана Qt (через QWindowsScreen); 0 — если недоступен."""
+    try:
+        ni = screen.nativeInterface()
+        return int(ni.handle()) if ni is not None else 0
+    except Exception:
+        return 0
+
+
+_monitor_map_cache = None
+
+
+def monitor_map_refresh() -> None:
+    """Сбрасывает кэш соответствия «экран Qt ↔ монитор Windows»."""
+    global _monitor_map_cache
+    _monitor_map_cache = None
+
+
+def monitor_map() -> list:
+    """[(QScreen, HMONITOR, QRect — физический прямоугольник монитора)]."""
+    global _monitor_map_cache
+    if _monitor_map_cache is not None:
+        return _monitor_map_cache
+    items = []
+    try:
+        for s in QApplication.screens():
+            h = screen_native_handle(s)
+            if not h:
+                continue
+            m = get_monitor_info_hmon(h).rcMonitor
+            items.append((s, h, QRect(int(m.left), int(m.top),
+                                      int(m.right - m.left), int(m.bottom - m.top))))
+    except Exception:
+        items = []
+    _monitor_map_cache = items
+    return items
+
+
+def screen_at_physical(pt: QPoint, retry: bool = True):
+    """(QScreen, QRect физического монитора) для точки; None — если не найдено."""
+    for scr, _h, mon in monitor_map():
+        if mon.contains(pt):
+            return scr, mon
+    if retry:                    # дисплеи могли поменяться — пересобрать карту
+        monitor_map_refresh()
+        return screen_at_physical(pt, retry=False)
+    return None
+
+
+def screen_for_monitor(mon: QRect):
+    """QScreen, чей монитор совпадает с данным физическим прямоугольником."""
+    for scr, _h, m in monitor_map():
+        if m == mon:
+            return scr
+    monitor_map_refresh()
+    for scr, _h, m in monitor_map():
+        if m == mon:
+            return scr
+    return None
+
+
+class ScreenGrab:
+    """Снимок одного монитора + пересчёт «физические пиксели ↔ пиксели картинки».
+
+    grabWindow() отдаёт картинку своего монитора; её размер может совпадать
+    с физическим (обычно) или с логическим (при масштабировании) — коэффициент
+    kx/ky учитывает оба случая.
+    """
+
+    def __init__(self, mon: QRect, img: QImage):
+        self.mon = mon
+        self.img = img
+        self.kx = mon.width() / max(1, img.width())
+        self.ky = mon.height() / max(1, img.height())
+
+    @classmethod
+    def capture(cls, hwnd: int):
+        """Снимок монитора, на котором находится окно (панель задач)."""
+        mon = monitor_rect_for(hwnd)
+        if mon.width() < 16 or mon.height() < 16:
+            return None
+        scr = screen_for_monitor(mon)
+        if scr is None:
+            return None
+        try:
+            img = scr.grabWindow(0).toImage()
+        except Exception:
+            return None
+        if img is None or img.isNull():
+            return None
+        return cls(mon, img)
+
+    def to_img(self, phys: QRect) -> QRect:
+        """Глобальный физический прямоугольник → пиксели картинки."""
+        return QRect(round((phys.x() - self.mon.x()) / self.kx),
+                     round((phys.y() - self.mon.y()) / self.ky),
+                     max(1, round(phys.width() / self.kx)),
+                     max(1, round(phys.height() / self.ky)))
+
+    def to_phys(self, img_rect: QRect) -> QRect:
+        """Пиксели картинки → глобальный физический прямоугольник."""
+        return QRect(round(self.mon.x() + img_rect.x() * self.kx),
+                     round(self.mon.y() + img_rect.y() * self.ky),
+                     max(1, round(img_rect.width() * self.kx)),
+                     max(1, round(img_rect.height() * self.ky)))
+
+    def to_phys_point(self, img_pt: QPoint) -> QPoint:
+        return QPoint(round(self.mon.x() + img_pt.x() * self.kx),
+                      round(self.mon.y() + img_pt.y() * self.ky))
 
 
 def physical_point_to_logical(pt: QPoint) -> QPoint | None:
+    """Физические пиксели (UIA/WinAPI) → логические координаты Qt.
+
+    У каждого монитора может быть свой масштаб (DPR), поэтому точку считаем
+    от начала своего монитора.
+    """
+    hit = screen_at_physical(pt)
+    if hit is not None:
+        scr, mon = hit
+        dpr = float(scr.devicePixelRatio() or 1.0)
+        g = scr.geometry()
+        return QPoint(round(g.x() + (pt.x() - mon.x()) / dpr),
+                      round(g.y() + (pt.y() - mon.y()) / dpr))
+    # запасной вариант: масштаб основного экрана (как было раньше)
     scr = QApplication.primaryScreen()
     if scr is None:
         return None
@@ -586,6 +823,16 @@ def physical_point_to_logical(pt: QPoint) -> QPoint | None:
     if abs(dpr - 1.0) < 1e-6:
         return pt
     return QPoint(round(pt.x() / dpr), round(pt.y() / dpr))
+
+
+def physical_to_logical(rect: QRect) -> QRect | None:
+    """Перевод прямоугольника по двум точкам — на стыке мониторов не поедет."""
+    tl = physical_point_to_logical(rect.topLeft())
+    br = physical_point_to_logical(QPoint(rect.x() + rect.width(),
+                                          rect.y() + rect.height()))
+    if tl is None or br is None:
+        return None
+    return QRect(tl.x(), tl.y(), max(1, br.x() - tl.x()), max(1, br.y() - tl.y()))
 
 
 def analyze_button_region(img: QImage, phys_rect: QRect):
@@ -639,16 +886,20 @@ def analyze_button_region(img: QImage, phys_rect: QRect):
     return QPoint((minx + maxx) // 2, (miny + maxy) // 2), bg
 
 
-def find_first_taskbar_icon(img: QImage, tb: QRect):
-    """Эвристика без UIA: первый значок слева на панели задач (обычно это «Пуск»).
+def find_start_icon(img: QImage, tb_img: QRect):
+    """Эвристика без UIA: центр значка «Пуск» по пикселям панели задач.
 
-    Возвращает (QPoint — центр в физических пикселях, (r, g, b) — цвет панели)
-    или None. На панели с центрированными значками первый значок группы — тоже
-    кнопка «Пуск».
+    tb_img — прямоугольник панели в пикселях картинки. Возвращает
+    (QPoint — центр значка в пикселях картинки, (r, g, b) — цвет панели)
+    или None.
+
+    Панель выровнена по левому краю (тогда «Пуск» — первый значок) или по
+    центру, как в Windows 11 (тогда «Пуск» — первый значок центральной
+    группы). Одинокий виджет в левом углу (погода) пропускается.
     """
     if img is None or img.isNull():
         return None
-    r = tb.intersected(QRect(0, 0, img.width(), img.height()))
+    r = tb_img.intersected(QRect(0, 0, img.width(), img.height()))
     if r.width() < 32 or r.height() < 16:
         return None
 
@@ -664,13 +915,12 @@ def find_first_taskbar_icon(img: QImage, tb: QRect):
     samples.sort(key=lambda c: c[0] + c[1] + c[2])
     bg = samples[len(samples) // 2]
 
+    # столбцы, где есть пиксели, заметно отличающиеся от фона
     inset_x = max(3, r.height() // 12)
     inset_y = max(4, r.height() // 8)
     step = 2
     need = max(3, ((r.bottom() - inset_y) - (r.top() + inset_y)) // (8 * step))
-    max_w = max(24, int(r.height() * 1.5))     # ширина значка ~ высота панели
-    run_start = run_end = None
-    gap = 0
+    columns = []
     for x in range(r.left() + inset_x, r.right() - inset_x, step):
         cnt = 0
         for y in range(r.top() + inset_y, r.bottom() - inset_y, step):
@@ -680,20 +930,57 @@ def find_first_taskbar_icon(img: QImage, tb: QRect):
                 cnt += 1
                 if cnt >= need:
                     break
-        if cnt >= need:
-            if run_start is None:
-                run_start = x
-            run_end = x
-            gap = 0
-        elif run_start is not None:
-            gap += step
-            if gap > 8:
+        columns.append(cnt >= need)
+
+    # склеиваем столбцы в группы — значки и кнопки (разрывы до ~3 шагов внутри)
+    clusters = []
+    i, n = 0, len(columns)
+    while i < n:
+        if not columns[i]:
+            i += 1
+            continue
+        j = i
+        while True:
+            nxt = None
+            for k in (1, 2, 3):
+                if j + k < n and columns[j + k]:
+                    nxt = j + k
+                    break
+            if nxt is None:
                 break
-        if run_start is not None and (x - run_start) > max_w:
-            break
-    if run_start is None or run_end is None:
+            j = nxt
+        clusters.append([r.left() + inset_x + i * step, r.left() + inset_x + j * step])
+        i = j + 1
+    if not clusters:
         return None
-    cx = (run_start + run_end) // 2
+    clusters = [c for c in clusters if c[1] - c[0] >= 2]   # одиночные столбцы — шум
+    if not clusters:
+        return None
+
+    # группы значков: разрыв больше ~1.5 высоты панели разделяет группы
+    big_gap = r.height() * 1.5
+    groups = [[clusters[0]]]
+    for prev, cur in zip(clusters, clusters[1:]):
+        if cur[0] - prev[1] > big_gap:
+            groups.append([cur])
+        else:
+            groups[-1].append(cur)
+
+    # у Windows 11 слева может одиноко стоять виджет погоды — отдельная
+    # маленькая группа у самого края; «Пуск» — первая группа после неё
+    if len(groups) >= 2:
+        g0, g1 = groups[0], groups[1]
+        near_left = (g0[0][0] - (r.left() + inset_x)) <= r.height()
+        small = len(g0) <= 5 and (g0[-1][1] - g0[0][0]) <= r.height() * 4.5
+        g1_near_right = (r.right() - inset_x - g1[-1][1]) <= r.height() * 2
+        if near_left and small and not g1_near_right:
+            groups = groups[1:]
+
+    start_x, end_x = groups[0][0]
+    max_w = int(r.height() * 1.6)       # ширина кнопки «Пуск» ~ высота панели
+    if end_x - start_x > max_w:
+        end_x = start_x + max_w
+    cx = (start_x + end_x) // 2
     cy = (r.top() + r.bottom()) // 2
     return QPoint(cx, cy), bg
 
@@ -795,11 +1082,18 @@ class Overlay(QWidget):
         self._key = None
         self.calibration = False
         self._drag_from = None
-        self.on_calibrated = on_calibrated   # callback(QRect) — новый прямоугольник
+        self.on_calibrated = on_calibrated   # callback(widget, QRect) — новый прямоугольник
 
     # -- картинка --------------------------------------------------------------
-    def set_icon_source(self, path: str, logical_size: int, bg=None, shape: str = "rounded") -> None:
-        dpr = float(self.devicePixelRatioF() or 1.0)
+    def set_icon_source(self, path: str, logical_size: int, bg=None, shape: str = "rounded",
+                        dpr: float | None = None) -> None:
+        """dpr — масштаб монитора, на котором будет показан значок. Раньше
+        брали devicePixelRatioF() самого оверлея, но до показа он равен dpr
+        основного экрана — на втором мониторе с другим масштабом получалось
+        мыло."""
+        if dpr is None:
+            dpr = float(self.devicePixelRatioF() or 1.0)
+        dpr = float(dpr or 1.0)
         key = (path, int(logical_size), dpr, tuple(bg) if bg else None, shape)
         if key == self._key and self._pm is not None:
             return
@@ -890,8 +1184,33 @@ class Overlay(QWidget):
         if self.calibration and self._drag_from is not None:
             self._drag_from = None
             if self.on_calibrated:
-                self.on_calibrated(self.frameGeometry())
+                self.on_calibrated(self, self.frameGeometry())
             e.accept()
+
+
+class OverlayHost:
+    """Значок на одной панели задач: окно-оверлей + кэш найденной кнопки.
+
+    Приложение держит по одному «хозяину» на каждую панель задач (то есть на
+    каждый монитор), чтобы значок был на всех кнопках «Пуск» сразу.
+    """
+
+    def __init__(self, hwnd: int, overlay: "Overlay"):
+        self.hwnd = hwnd
+        self.overlay = overlay
+        self.base_center = None        # чистая середина кнопки (логические пиксели)
+        self.last_geo = None           # геометрия оверлея с учётом сдвига
+        self._btn_key = None           # (x, y, w, h) кнопки в физ. пикселях
+        self._icon_center_phys = None  # реальный центр значка на кнопке
+        self._taskbar_bg = None        # цвет панели задач под значком
+        self._shown_geo = None         # что реально выставлено у окна
+
+    def close(self) -> None:
+        try:
+            self.overlay.close()
+            self.overlay.deleteLater()
+        except Exception:
+            pass
 
 
 # ------------------------------------------------------------------- оформление
@@ -1167,6 +1486,11 @@ class SettingsWindow(QWidget):
         titles.addWidget(self.lbl_sub)
         h.addLayout(titles)
         h.addStretch(1)
+
+        lbl_ver = QLabel("v" + APP_VERSION)
+        lbl_ver.setObjectName("Subtitle")
+        h.addWidget(lbl_ver)
+        h.addSpacing(4)
 
         btn_close = QPushButton("✕")
         btn_close.setObjectName("WinBtn")
@@ -1601,7 +1925,8 @@ class SettingsWindow(QWidget):
 
 
 # ---------------------------------------------------------------- автозагрузка
-TASK_NAME = "IconsPo"
+TASK_NAME = "WinIcons"
+TASK_NAME_LEGACY = "IconsPo"          # имя задачи из версии 1.0 — удаляем при переключении
 TASK_RESULT_FILE = os.path.join(APPDATA_DIR, "last_task_result.txt")
 
 
@@ -1609,10 +1934,11 @@ def _ps_quote(s: str) -> str:
     return "'" + str(s).replace("'", "''") + "'"
 
 
-def startup_lnk_path() -> str:
+def startup_lnk_path(legacy: bool = False) -> str:
+    """Путь ярлыка в «Автозагрузке» (legacy=True — имя из версии 1.0)."""
     startup = os.path.join(os.environ["APPDATA"], "Microsoft", "Windows",
                            "Start Menu", "Programs", "Startup")
-    return os.path.join(startup, "IconsPo.lnk")
+    return os.path.join(startup, "IconsPo.lnk" if legacy else "WinIcons.lnk")
 
 
 def _parent_exe_path() -> str:
@@ -1683,11 +2009,16 @@ def _decode(p: subprocess.CompletedProcess) -> str:
     return (p.stderr or p.stdout or b"").decode("cp866", "replace").strip()[:300]
 
 
-def task_exists() -> bool:
+def _task_exists_named(name: str) -> bool:
     try:
-        return _run_hidden(["schtasks", "/Query", "/TN", TASK_NAME]).returncode == 0
+        return _run_hidden(["schtasks", "/Query", "/TN", name]).returncode == 0
     except Exception:
         return False
+
+
+def task_exists() -> bool:
+    """Задача с новым именем или оставшаяся от версии 1.0."""
+    return _task_exists_named(TASK_NAME) or _task_exists_named(TASK_NAME_LEGACY)
 
 
 def task_set(enabled: bool) -> tuple[bool, str]:
@@ -1697,9 +2028,15 @@ def task_set(enabled: bool) -> tuple[bool, str]:
             target, args = autostart_cmdline()
             p = _run_hidden(["schtasks", "/Create", "/F", "/TN", TASK_NAME, "/SC", "ONLOGON",
                              "/TR", f'"{target}" {args}', "/IT"])
+            ok = _task_exists_named(TASK_NAME)
+            if ok:
+                # перенос с 1.0: старая задача IconsPo больше не нужна
+                _run_hidden(["schtasks", "/Delete", "/F", "/TN", TASK_NAME_LEGACY])
         else:
             p = _run_hidden(["schtasks", "/Delete", "/F", "/TN", TASK_NAME])
-        if task_exists() == enabled:
+            _run_hidden(["schtasks", "/Delete", "/F", "/TN", TASK_NAME_LEGACY])
+            ok = not task_exists()
+        if ok:
             return True, ""
         return False, _decode(p) or f"код {p.returncode}"
     except Exception as ex:
@@ -1748,10 +2085,12 @@ def install_task_cli(enable: bool) -> int:
 def shortcut_set(enabled: bool) -> tuple[bool, str]:
     """Запасной вариант: ярлык в папке «Автозагрузка» (не требует прав админа)."""
     lnk = startup_lnk_path()
+    lnk_legacy = startup_lnk_path(legacy=True)
     try:
         if not enabled:
-            if os.path.exists(lnk):
-                os.remove(lnk)
+            for path_ in (lnk, lnk_legacy):
+                if os.path.exists(path_):
+                    os.remove(path_)
             return True, ""
         target, args = autostart_cmdline()
         workdir = (os.path.dirname(os.path.abspath(target)) if args == "--autostart"
@@ -1771,6 +2110,12 @@ def shortcut_set(enabled: bool) -> tuple[bool, str]:
         if p.returncode != 0 or not os.path.exists(lnk):
             msg = (p.stderr or p.stdout or b"").decode("utf-8", "replace").strip()
             return False, msg[:300] or "не удалось создать ярлык"
+        # перенос с 1.0: старый ярлык IconsPo.lnk больше не нужен
+        try:
+            if os.path.exists(lnk_legacy):
+                os.remove(lnk_legacy)
+        except OSError:
+            pass
         return True, ""
     except Exception as ex:
         return False, str(ex)
@@ -1778,7 +2123,7 @@ def shortcut_set(enabled: bool) -> tuple[bool, str]:
 
 def shortcut_exists() -> bool:
     try:
-        return os.path.exists(startup_lnk_path())
+        return os.path.exists(startup_lnk_path()) or os.path.exists(startup_lnk_path(legacy=True))
     except Exception:
         return False
 
@@ -1802,8 +2147,8 @@ class ForegroundWatcher:
     EVENT_SYSTEM_FOREGROUND = 0x0003
     WINEVENT_OUTOFCONTEXT = 0x0000
 
-    def __init__(self, overlay: "Overlay"):
-        self.overlay = overlay
+    def __init__(self, on_foreground):
+        self.on_foreground = on_foreground   # callable() — поднять значки наверх
         self._hook = None
         self._cb = None
 
@@ -1835,9 +2180,43 @@ class ForegroundWatcher:
 
     def _on_event(self, _hook, _event, _hwnd, _id_obj, _id_child, _thread, _time) -> None:
         try:
-            self.overlay._raise_now()
+            self.on_foreground()
         except Exception:
             pass
+
+
+class SessionEndFilter(QAbstractNativeEventFilter):
+    """Штатно закрывает программу при выключении, перезагрузке или выходе
+    из системы Windows.
+
+    Система рассылает WM_ENDSESSION всем окнам сеанса. Раньше программа
+    просто оставалась висеть (значки — отдельные always-on-top окна) до
+    принудительного завершения процесса, из-за чего Windows могла задерживать
+    завершение работы. Теперь по этому сообщению приложение само сохраняет
+    настройки и выходит.
+    """
+
+    WM_ENDSESSION = 0x0016
+
+    def __init__(self, on_session_end):
+        super().__init__()
+        self._on_session_end = on_session_end   # callable() — обычный выход
+        self._done = False
+
+    def nativeEventFilter(self, event_type, message):
+        try:
+            if bytes(event_type) == b"windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if (msg.message == self.WM_ENDSESSION and msg.wParam
+                        and not self._done):
+                    self._done = True
+                    # Выход выполняем сразу: Qt на это же сообщение сам
+                    # останавливает цикл событий, поэтому любая отложенная
+                    # очистка (quit) уже не успела бы выполниться.
+                    self._on_session_end()
+        except Exception:
+            pass
+        return False, 0
 
 
 # ---------------------------------------------------------------- приложение
@@ -1859,17 +2238,14 @@ class App(QObject):
         if self.cfg.get("image"):          # старый конфиг: картинка попадает в галерею
             self._remember(self.cfg["image"])
 
-        self.overlay = Overlay(on_calibrated=self._on_calibrated)
         self.locator = StartLocator()
+        self.locator.hide_overlays = self._hide_all
+        self.hosts: dict[int, OverlayHost] = {}   # панель задач -> значок на ней
+        self._screens_connected: set = set()
         self.settings: SettingsWindow | None = None
         self.status = tr("status_init")
-        self.base_center: QPoint | None = None
-        self.last_geo: QRect | None = None
-        self._btn_key = None
-        self._icon_center_phys: QPoint | None = None
-        self._taskbar_bg = None
         self._last_btn_h = 48
-        self._shown_geo: QRect | None = None   # чтобы зря не дёргать setGeometry
+        self._quitting = False
 
         self.tray = QSystemTrayIcon(self._build_tray_icon(), self)
         self.tray.setToolTip(APP_TITLE + " — " + tr("app_sub"))
@@ -1890,15 +2266,77 @@ class App(QObject):
         QTimer.singleShot(50, self.tick)
 
         # Сторож z-порядка: панель задач при кликах залезает поверх оверлея —
-        # возвращаем значок наверх не позднее чем через 0,3 с.
+        # возвращаем значки наверх не позднее чем через 0,3 с.
         self.top_timer = QTimer(self)
         self.top_timer.setInterval(300)
-        self.top_timer.timeout.connect(self.overlay._raise_now)
+        self.top_timer.timeout.connect(self._raise_all)
         self.top_timer.start()
 
         # Мгновенная реакция на смену переднего окна (клик по «Пуску», панели задач).
-        self._fg_watch = ForegroundWatcher(self.overlay)
+        self._fg_watch = ForegroundWatcher(self._raise_all)
         self._fg_watch.start()
+
+        # Смена экранов (подключение/отключение монитора, смена масштаба) —
+        # пересчитываем карту мониторов и заново расставляем значки.
+        try:
+            qt_app.screenAdded.connect(self._on_screens_changed)
+            qt_app.screenRemoved.connect(self._on_screens_changed)
+        except Exception:
+            pass
+        self._connect_screen_signals()
+
+    # -- значки на панелях задач -------------------------------------------------
+    def _hide_all(self):
+        """Прячет все значки (перед снимком экрана)."""
+        for host in self.hosts.values():
+            try:
+                if host.overlay.isVisible():
+                    host.overlay.hide()
+            except Exception:
+                pass
+
+    def _raise_all(self):
+        """Поднимает все значки поверх панели задач."""
+        for host in self.hosts.values():
+            try:
+                if host.overlay.isVisible():
+                    host.overlay._raise_now()
+            except Exception:
+                pass
+
+    def _invalidate_icons(self):
+        """Сбрасывает кэш картинки у всех значков (после смены файла/формы)."""
+        for host in self.hosts.values():
+            host.overlay._key = None
+
+    def _drop_hosts(self, alive: set):
+        """Закрывает значки панелей задач, которые исчезли (например, монитор
+        отключили или перезапустился проводник)."""
+        for hwnd in [h for h in self.hosts if h not in alive]:
+            host = self.hosts.pop(hwnd)
+            app_log("панель задач %d исчезла — убираю значок" % hwnd)
+            host.close()
+
+    def _connect_screen_signals(self):
+        """Подписывается на изменение геометрии каждого экрана."""
+        app = QApplication.instance()
+        if app is None:
+            return
+        for s in app.screens():
+            if s in self._screens_connected:
+                continue
+            try:
+                s.geometryChanged.connect(self._on_screens_changed)
+            except Exception:
+                pass
+            self._screens_connected.add(s)
+
+    def _on_screens_changed(self, *args):
+        """Монитор подключили/отключили или изменили масштаб."""
+        monitor_map_refresh()
+        self.locator.invalidate()
+        self._connect_screen_signals()
+        self.tick()
 
     # -- трей ------------------------------------------------------------------
     def _build_tray_icon(self) -> QIcon:
@@ -1976,7 +2414,7 @@ class App(QObject):
         self.cfg["image"] = path
         self._remember(path)
         app_log("значок из файла: " + path)
-        self.overlay._key = None
+        self._invalidate_icons()
         if self.settings is not None:
             self.settings.refresh_preview()
         self.tick()
@@ -1985,7 +2423,7 @@ class App(QObject):
         self.cfg["image"] = ""
         self._remember("")
         app_log("значок: стандартный")
-        self.overlay._key = None
+        self._invalidate_icons()
         if self.settings is not None:
             self.settings.refresh_preview()
         self.tick()
@@ -1999,7 +2437,7 @@ class App(QObject):
         self.cfg["image"] = ref
         self._remember(ref)
         app_log("пресет: " + key)
-        self.overlay._key = None
+        self._invalidate_icons()
         if self.settings is not None:
             self.settings.refresh_preview()
             self.settings.sync_from_cfg()
@@ -2031,7 +2469,7 @@ class App(QObject):
         self.cfg["image"] = path
         self._remember(path)
         app_log("значок из галереи: " + (os.path.basename(path) if path else "стандартный"))
-        self.overlay._key = None
+        self._invalidate_icons()
         if self.settings is not None:
             self.settings.refresh_preview()
         self.tick()
@@ -2042,7 +2480,7 @@ class App(QObject):
         self.cfg["shape"] = shape
         save_cfg(self.cfg)
         app_log("форма: " + shape)
-        self.overlay._key = None
+        self._invalidate_icons()
         if self.settings is not None:
             self.settings.refresh_preview()
         self.tick()
@@ -2136,17 +2574,26 @@ class App(QObject):
         return box.clickedButton() is b_task
 
     def set_calibration(self, on: bool):
-        if on and self.base_center is None:
-            self.base_center = self.overlay.geometry().center()
-        self.overlay.set_calibration(on)
+        if on:
+            # Сначала обычная расстановка: значки должны стоять на кнопках,
+            # иначе при включении перетаскивания окно прыгнет.
+            self.tick()
+        for host in self.hosts.values():
+            host.overlay.set_calibration(on)
         self.tick()
 
-    def _on_calibrated(self, rect: QRect):
-        if self.base_center is None:
+    def _on_calibrated(self, widget, rect: QRect):
+        """Пользователь перетащил значок: сохраняем сдвиг относительно кнопки."""
+        host = None
+        for h in self.hosts.values():
+            if h.overlay is widget:
+                host = h
+                break
+        if host is None or host.base_center is None:
             return
         c = rect.center()
-        self.cfg["offset_x"] = int(c.x() - self.base_center.x())
-        self.cfg["offset_y"] = int(c.y() - self.base_center.y())
+        self.cfg["offset_x"] = int(c.x() - host.base_center.x())
+        self.cfg["offset_y"] = int(c.y() - host.base_center.y())
         save_cfg(self.cfg)
         app_log("калибровка: сдвиг %d, %d" % (self.cfg["offset_x"], self.cfg["offset_y"]))
         if self.settings is not None:
@@ -2162,79 +2609,128 @@ class App(QObject):
 
     def _tick_impl(self):
         if not self.cfg["enabled"]:
-            self.overlay.hide()
+            self._hide_all()
             self._set_status(tr("status_disabled"))
             return
-        if self.overlay.calibration:
-            self.overlay.show()
-            self.overlay._interactive_topmost()
+        if any(h.overlay.calibration for h in self.hosts.values()):
+            for host in self.hosts.values():
+                host.overlay.show()
+            self._raise_all()
             self._set_status(tr("status_calibration"))
             return
         if self.cfg["hide_fullscreen"] and foreground_is_fullscreen():
-            self.overlay.hide()
+            self._hide_all()
             self._set_status(tr("status_fullscreen"))
             return
-        res = self.locator.locate()
-        if res is None:
-            self.overlay.hide()
+        # Эвристике нужен снимок панели задач — значки не должны в него попасть.
+        if self.locator.wants_pixels():
+            self._hide_all()
+            self.qt_app.processEvents()
+        results = self.locator.locate_all()
+        self._drop_hosts({r["hwnd"] for r in results})
+        if not results:
+            self._hide_all()
             self._set_status(tr("status_no_taskbar"))
             return
-        phys, offscreen = res
-        if offscreen:
-            self.overlay.hide()
+
+        # Раскладываем результаты по значкам; для новых/переехавших кнопок
+        # запоминаем, что нужно уточнить центр.
+        placed = []                             # (host, кнопка в логических, результат)
+        to_measure = []                         # (host, кнопка в физ. пикселях)
+        for r in results:
+            hwnd = r["hwnd"]
+            if r["offscreen"]:
+                host = self.hosts.get(hwnd)
+                if host is not None and host.overlay.isVisible():
+                    host.overlay.hide()
+                continue
+            log = physical_to_logical(r["rect"])
+            if log is None:
+                continue
+            host = self.hosts.get(hwnd)
+            if host is None:
+                host = OverlayHost(hwnd, Overlay(on_calibrated=self._on_calibrated))
+                self.hosts[hwnd] = host
+            key = (r["rect"].x(), r["rect"].y(), r["rect"].width(), r["rect"].height())
+            if key != host._btn_key:
+                host._btn_key = key
+                host._icon_center_phys = None
+                host._taskbar_bg = None
+                to_measure.append((host, r["rect"]))
+            placed.append((host, log, r))
+        if not placed:
+            self._hide_all()
             self._set_status(tr("status_taskbar_hidden"))
             return
-        log = physical_to_logical(phys)
-        if log is None:
-            self.overlay.hide()
-            return
-        self._last_btn_h = int(log.height())
-        # Уточняем реальный центр значка и фон панели (кэш до смены геометрии)
-        key = (phys.x(), phys.y(), phys.width(), phys.height())
-        if key != self._btn_key:
-            self._btn_key = key
-            info = self._measure_icon_center(phys)
-            self._icon_center_phys = info[0] if info else None
-            self._taskbar_bg = info[1] if info else None
-        center_phys = self._icon_center_phys or phys.center()
-        center = physical_point_to_logical(center_phys) or log.center()
+        self._last_btn_h = int(placed[0][1].height())
+
+        # Уточняем реальный центр значка и фон панели под ним: один снимок на
+        # панель, при этом все значки разом прячем (иначе попадут в снимок).
+        if to_measure:
+            self._hide_all()
+            self.qt_app.processEvents()
+            for host, phys in to_measure:
+                info = self._measure_icon_center(phys, host.hwnd)
+                if info is not None:
+                    host._icon_center_phys, host._taskbar_bg = info
 
         src = current_source(self.cfg)
         size = int(self.cfg["size"] or 0)
         if size <= 0:
             size = self.auto_size()
-        self.base_center = center
-        geo = QRect(round(self.base_center.x() - size / 2 + self.cfg["offset_x"]),
-                    round(self.base_center.y() - size / 2 + self.cfg["offset_y"]),
-                    size, size)
-        self.last_geo = geo
-        self.overlay.set_icon_source(src, size, self._taskbar_bg,
-                                     str(self.cfg.get("shape") or "rounded"))
-        if geo != self._shown_geo:
-            self.overlay.setGeometry(geo)
-            self._shown_geo = geo
-        if not self.overlay.isVisible():
-            self.overlay.show()                    # showEvent сам поднимет поверх всех
-        else:
-            self.overlay._raise_now()              # панель задач любит залезать при кликах
-        if self.locator.source == "uia":
-            self._set_status(tr("status_found").format(w=log.width(), h=log.height()))
-        else:
-            self._set_status(tr("status_found_approx").format(w=log.width(), h=log.height()))
+        shape = str(self.cfg.get("shape") or "rounded")
+        ox = int(self.cfg["offset_x"])
+        oy = int(self.cfg["offset_y"])
+        for host, log, _r in placed:
+            center = None
+            if host._icon_center_phys is not None:
+                center = physical_point_to_logical(host._icon_center_phys)
+            if center is None:
+                center = log.center()
+            host.base_center = center
+            geo = QRect(round(center.x() - size / 2 + ox),
+                        round(center.y() - size / 2 + oy), size, size)
+            host.last_geo = geo
+            scr = QApplication.screenAt(geo.center()) or QApplication.primaryScreen()
+            dpr = float(scr.devicePixelRatio() if scr else 1.0) or 1.0
+            host.overlay.set_icon_source(src, size, host._taskbar_bg, shape, dpr)
+            if geo != host._shown_geo:
+                host.overlay.setGeometry(geo)
+                host._shown_geo = geo
+            if not host.overlay.isVisible():
+                host.overlay.show()            # showEvent сам поднимет поверх всех
+            else:
+                host.overlay._raise_now()      # панель задач любит залезать при кликах
 
-    def _measure_icon_center(self, phys: QRect):
-        """Уточняет центр значка и цвет панели под кнопкой (кэш до смены геометрии)."""
-        scr = QApplication.primaryScreen()
-        if scr is None:
+        n = len(placed)
+        w = placed[0][1].width()
+        h = placed[0][1].height()
+        if n < len(results):
+            self._set_status(tr("status_partial").format(n=n, total=len(results)))
+        elif self.locator.source == "uia":
+            key = "status_found_multi" if n > 1 else "status_found"
+            self._set_status(tr(key).format(n=n, w=w, h=h))
+        else:
+            key = "status_found_approx_multi" if n > 1 else "status_found_approx"
+            self._set_status(tr(key).format(n=n, w=w, h=h))
+
+    def _measure_icon_center(self, phys: QRect, hwnd: int):
+        """Уточняет центр значка и цвет панели под кнопкой (кэш до смены геометрии).
+
+        Снимок берётся с того монитора, где находится панель задач; возвращает
+        точку в физических пикселях виртуального рабочего стола.
+        """
+        grab = ScreenGrab.capture(hwnd)
+        if grab is None:
             return None
         try:
-            if self.overlay.isVisible():
-                self.overlay.hide()
-                self.qt_app.processEvents()
-            img = scr.grabWindow(0).toImage()
+            info = analyze_button_region(grab.img, grab.to_img(phys))
         except Exception:
             return None
-        return analyze_button_region(img, phys)
+        if info is None:
+            return None
+        p, bg = info
+        return grab.to_phys_point(p), bg
 
     def _set_status(self, text: str):
         """Состояние показывается в подсказке значка трея (в окне настроек текста нет)."""
@@ -2248,6 +2744,9 @@ class App(QObject):
             pass
 
     def quit(self):
+        if self._quitting:              # выход уже начался — не повторяем
+            return
+        self._quitting = True
         try:
             chain = " <- ".join("%s:%d" % (f.name, f.lineno)
                                 for f in traceback.extract_stack()[-4:-1])
@@ -2265,7 +2764,10 @@ class App(QObject):
         except Exception:
             pass
         try:
-            self.overlay.close()
+            self._hide_all()
+            for host in list(self.hosts.values()):
+                host.close()
+            self.hosts.clear()
         except Exception:
             pass
         self.qt_app.quit()
@@ -2276,8 +2778,15 @@ def _grab_region(screen, log_rect: QRect, path: str):
     try:
         img = screen.grabWindow(0).toImage()
         scale = float(screen.devicePixelRatio() or 1.0)
-        crop = QRect(int(log_rect.x() * scale), int(log_rect.y() * scale),
-                     int(log_rect.width() * scale), int(log_rect.height() * scale))
+        g = screen.geometry()
+        # Картинка может быть в физических или в логических пикселях — коэффициент
+        # kx/ky переводит логические координаты экрана в пиксели картинки.
+        kx = (g.width() * scale) / max(1, img.width())
+        ky = (g.height() * scale) / max(1, img.height())
+        crop = QRect(int((log_rect.x() - g.x()) * scale / kx),
+                     int((log_rect.y() - g.y()) * scale / ky),
+                     int(log_rect.width() * scale / kx),
+                     int(log_rect.height() * scale / ky))
         crop = crop.intersected(QRect(0, 0, img.width(), img.height()))
         if crop.width() > 0 and crop.height() > 0:
             img.copy(crop).save(path, "PNG")
@@ -2285,9 +2794,26 @@ def _grab_region(screen, log_rect: QRect, path: str):
         pass
 
 
+def _selftest_region(host) -> QRect:
+    """Область вокруг значка для контрольного снимка."""
+    g = host.last_geo
+    pad = 130
+    return QRect(g.x() - pad, g.y() - 70, g.width() + 2 * pad, g.height() + 140)
+
+
+def _selftest_shot(host, out_dir: str, tag: str, index: int):
+    """Снимок панели задач вокруг значка этого хоста."""
+    if host.last_geo is None:
+        return
+    scr = QApplication.screenAt(host.last_geo.center()) or QApplication.primaryScreen()
+    _grab_region(scr, _selftest_region(host),
+                 os.path.join(out_dir, "selftest_%s_%d.png" % (tag, index)))
+
+
 def run_selftest(qt_app: QApplication, ctrl: App, out_dir: str):
     report = {
         "python": sys.version.split()[0],
+        "version": APP_VERSION,
         "windows_build": sys.getwindowsversion().build,
         "uia_available": _HAS_UIA,
         "exe": app_exe_path(),
@@ -2299,56 +2825,64 @@ def run_selftest(qt_app: QApplication, ctrl: App, out_dir: str):
     report["dpr"] = float(scr.devicePixelRatio() or 1.0)
     report["screen_logical"] = [scr.geometry().x(), scr.geometry().y(),
                                 scr.geometry().width(), scr.geometry().height()]
-    r = get_window_rect(get_taskbar_hwnd())
-    if r:
-        report["taskbar_rect_physical"] = [int(r.left), int(r.top),
-                                           int(r.right - r.left), int(r.bottom - r.top)]
-    res = ctrl.locator.locate()
+    report["screens"] = []
+    for s in QApplication.screens():
+        g = s.geometry()
+        report["screens"].append({
+            "name": s.name(),
+            "dpr": float(s.devicePixelRatio() or 1.0),
+            "logical": [g.x(), g.y(), g.width(), g.height()],
+            "hmon": screen_native_handle(s),
+        })
+    report["taskbars"] = []
+    for hw in enum_taskbars():
+        rr = get_window_rect(hw)
+        if rr:
+            report["taskbars"].append({
+                "hwnd": hw,
+                "rect": [int(rr.left), int(rr.top),
+                         int(rr.right - rr.left), int(rr.bottom - rr.top)],
+            })
+
+    ctrl.tick()                     # штатная расстановка всех значков
     report["locator_source"] = ctrl.locator.source
     if ctrl.locator.last_error:
         report["locator_error"] = ctrl.locator.last_error
-    if res is None:
+    report["status"] = ctrl.status
+    if not ctrl.hosts:
         report["error"] = "кнопка «Пуск» не найдена"
-    else:
-        phys, offscreen = res
-        report["start_rect_physical"] = [phys.x(), phys.y(), phys.width(), phys.height()]
-        report["start_offscreen"] = bool(offscreen)
-        log = physical_to_logical(phys)
-        report["start_rect_logical"] = [log.x(), log.y(), log.width(), log.height()]
-        ctrl.tick()                     # штатное позиционирование (с уточнением центра)
-        geo = ctrl.last_geo
-        report["status"] = ctrl.status
-        if geo is None:
-            # Запасной путь: ставим вручную, чтобы получить скриншоты для проверки
-            size = 26
-            c = log.center()
-            geo = QRect(round(c.x() - size / 2), round(c.y() - size / 2), size, size)
-            ctrl.overlay.set_icon_source(current_source(ctrl.cfg), size)
-            ctrl.overlay.setGeometry(geo)
-            ctrl.overlay.show()
-            ctrl.overlay.raise_()
-            ctrl.overlay._interactive_topmost()
-            report["fallback_position"] = True
-        if geo is not None:
-            if ctrl.base_center is not None:
-                report["center_logical"] = [ctrl.base_center.x(), ctrl.base_center.y()]
-            report["overlay_geometry"] = [geo.x(), geo.y(), geo.width(), geo.height()]
-            pad = 130
-            region = QRect(geo.x() - pad, geo.y() - 70, geo.width() + 2 * pad, geo.height() + 140)
-            ctrl.overlay.hide()
-            qt_app.processEvents()
-            _grab_region(scr, region, os.path.join(out_dir, "selftest_before.png"))
-            ctrl.overlay.show()
-            ctrl.overlay.raise_()
-            ctrl.overlay._interactive_topmost()
-            ex = exstyle_flags(int(ctrl.overlay.winId()))
-            report["overlay_ws_ex_transparent"] = bool(ex & WS_EX_TRANSPARENT)
-            report["overlay_ws_ex_layered"] = bool(ex & WS_EX_LAYERED)
-            report["overlay_ws_ex_toolwindow"] = bool(ex & WS_EX_TOOLWINDOW)
-            QTimer.singleShot(1000, lambda: _selftest_after(qt_app, ctrl, scr, region, out_dir, report))
-            return
-    # сюда попадаем только при ошибке
-    QTimer.singleShot(100, lambda: _selftest_report_only(qt_app, ctrl, out_dir, report))
+        QTimer.singleShot(100, lambda: _selftest_report_only(qt_app, ctrl, out_dir, report))
+        return
+
+    hosts = [h for h in ctrl.hosts.values() if h.last_geo is not None]
+    report["hosts"] = []
+    for i, host in enumerate(hosts):
+        item = {"index": i, "hwnd": host.hwnd}
+        if host.base_center is not None:
+            item["center_logical"] = [host.base_center.x(), host.base_center.y()]
+        g = host.last_geo
+        item["overlay_geometry"] = [g.x(), g.y(), g.width(), g.height()]
+        if host._btn_key:
+            item["btn_physical"] = list(host._btn_key)
+        if host._icon_center_phys is not None:
+            item["icon_center_physical"] = [host._icon_center_phys.x(),
+                                            host._icon_center_phys.y()]
+        try:
+            ex = exstyle_flags(int(host.overlay.winId()))
+            item["overlay_ws_ex_transparent"] = bool(ex & WS_EX_TRANSPARENT)
+            item["overlay_ws_ex_layered"] = bool(ex & WS_EX_LAYERED)
+            item["overlay_ws_ex_toolwindow"] = bool(ex & WS_EX_TOOLWINDOW)
+        except Exception:
+            pass
+        report["hosts"].append(item)
+
+    ctrl._hide_all()
+    qt_app.processEvents()
+    for i, host in enumerate(hosts):
+        _selftest_shot(host, out_dir, "before", i)
+    ctrl.tick()
+    qt_app.processEvents()
+    QTimer.singleShot(1000, lambda: _selftest_after(qt_app, ctrl, out_dir, report))
 
 
 def _selftest_report_only(qt_app: QApplication, ctrl: App, out_dir: str, report: dict):
@@ -2413,8 +2947,9 @@ def _selftest_gallery_restore(ctrl: App, prev_image: str, files: list) -> None:
         pass
 
 
-def _selftest_after(qt_app: QApplication, ctrl: App, scr, region: QRect, out_dir: str, report: dict):
-    _grab_region(scr, region, os.path.join(out_dir, "selftest_after.png"))
+def _selftest_after(qt_app: QApplication, ctrl: App, out_dir: str, report: dict):
+    for i, host in enumerate([h for h in ctrl.hosts.values() if h.last_geo is not None]):
+        _selftest_shot(host, out_dir, "after", i)
     win = ctrl.open_settings()
     ctrl.tick()
     prev_image = str(ctrl.cfg.get("image") or "")
@@ -2484,6 +3019,10 @@ def main() -> int:
         return 0
 
     ctrl = App(qt_app)
+    # Выключение/перезагрузка Windows: закрываемся по WM_ENDSESSION, чтобы
+    # не задерживать завершение сеанса (настройки сохраняет ctrl.quit()).
+    session_filter = SessionEndFilter(ctrl.quit)
+    qt_app.installNativeEventFilter(session_filter)
     apply_qss(qt_app, ctrl.cfg.get("theme", "dark"))
     if selftest:
         out_dir = os.getcwd()
