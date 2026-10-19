@@ -2189,31 +2189,41 @@ class SessionEndFilter(QAbstractNativeEventFilter):
     """Штатно закрывает программу при выключении, перезагрузке или выходе
     из системы Windows.
 
-    Система рассылает WM_ENDSESSION всем окнам сеанса. Раньше программа
-    просто оставалась висеть (значки — отдельные always-on-top окна) до
-    принудительного завершения процесса, из-за чего Windows могла задерживать
-    завершение работы. Теперь по этому сообщению приложение само сохраняет
-    настройки и выходит.
+    Система сначала присылает WM_QUERYENDSESSION (можно ли завершать сеанс),
+    а затем WM_ENDSESSION (сеанс действительно завершается). На первом этапе
+    сохраняем настройки, на втором — сразу выходим: Qt на это же сообщение
+    сам останавливает цикл событий, поэтому отложенная очистка уже не успеет
+    выполниться.
     """
 
+    WM_QUERYENDSESSION = 0x0011
     WM_ENDSESSION = 0x0016
 
-    def __init__(self, on_session_end):
+    def __init__(self, on_session_end, on_session_ending=None):
         super().__init__()
-        self._on_session_end = on_session_end   # callable() — обычный выход
+        self._on_session_end = on_session_end          # callable() — обычный выход
+        self._on_session_ending = on_session_ending    # callable() — сохранить состояние
+        self._prepared = False
         self._done = False
+        self.ended = False
 
     def nativeEventFilter(self, event_type, message):
         try:
             if bytes(event_type) == b"windows_generic_MSG":
                 msg = wintypes.MSG.from_address(int(message))
-                if (msg.message == self.WM_ENDSESSION and msg.wParam
-                        and not self._done):
-                    self._done = True
-                    # Выход выполняем сразу: Qt на это же сообщение сам
-                    # останавливает цикл событий, поэтому любая отложенная
-                    # очистка (quit) уже не успела бы выполниться.
-                    self._on_session_end()
+                if msg.message == self.WM_QUERYENDSESSION:
+                    # Сообщение приходит каждому окну — сохраняем один раз.
+                    if not self._prepared and self._on_session_ending is not None:
+                        self._prepared = True
+                        self._on_session_ending()
+                elif msg.message == self.WM_ENDSESSION:
+                    if not msg.wParam:
+                        # Завершение сеанса отменили — следующий раз сохраним снова.
+                        self._prepared = False
+                    elif not self._done:
+                        self._done = True
+                        self.ended = True
+                        self._on_session_end()
         except Exception:
             pass
         return False, 0
@@ -2743,6 +2753,18 @@ class App(QObject):
         except Exception:
             pass
 
+    def prepare_session_end(self):
+        """WM_QUERYENDSESSION: сохраняем состояние ещё до того, как Windows
+        начнёт закрывать приложение. Ошибки здесь не должны мешать завершению
+        сеанса, поэтому всё глушим."""
+        if self._quitting:
+            return
+        try:
+            app_log("Windows завершает сеанс — сохраняю настройки")
+            save_cfg(self.cfg)
+        except Exception:
+            pass
+
     def quit(self):
         if self._quitting:              # выход уже начался — не повторяем
             return
@@ -2754,6 +2776,15 @@ class App(QObject):
         except Exception:
             pass
         app_log("выход")
+        # Сначала останавливаем всё, что может сработать во время закрытия
+        # окон: таймеры, сторож переднего плана и т.п.
+        for timer in (getattr(self, "timer", None),
+                      getattr(self, "top_timer", None)):
+            try:
+                if timer is not None:
+                    timer.stop()
+            except Exception:
+                pass
         try:
             self._fg_watch.stop()
         except Exception:
@@ -2764,10 +2795,21 @@ class App(QObject):
         except Exception:
             pass
         try:
+            if self.settings is not None:
+                self.settings.hide()
+        except Exception:
+            pass
+        try:
             self._hide_all()
             for host in list(self.hosts.values()):
                 host.close()
             self.hosts.clear()
+        except Exception:
+            pass
+        # Закрываем и диалоги/окна настроек, если они открыты: quit() должен
+        # выйти из всех вложенных циклов событий, а не ждать пользователя.
+        try:
+            self.qt_app.closeAllWindows()
         except Exception:
             pass
         self.qt_app.quit()
@@ -3019,9 +3061,10 @@ def main() -> int:
         return 0
 
     ctrl = App(qt_app)
-    # Выключение/перезагрузка Windows: закрываемся по WM_ENDSESSION, чтобы
-    # не задерживать завершение сеанса (настройки сохраняет ctrl.quit()).
-    session_filter = SessionEndFilter(ctrl.quit)
+    # Выключение/перезагрузка Windows: на WM_QUERYENDSESSION сохраняем
+    # настройки, на WM_ENDSESSION штатно закрываемся, чтобы не задерживать
+    # завершение сеанса.
+    session_filter = SessionEndFilter(ctrl.quit, ctrl.prepare_session_end)
     qt_app.installNativeEventFilter(session_filter)
     apply_qss(qt_app, ctrl.cfg.get("theme", "dark"))
     if selftest:
@@ -3030,7 +3073,14 @@ def main() -> int:
     elif ctrl.first_run and not autostart_run:
         # Первый запуск — показываем настройки, дальше программа живёт в трее
         QTimer.singleShot(300, ctrl.open_settings)
-    return qt_app.exec()
+    rc = qt_app.exec()
+    if session_filter.ended:
+        # Сеанс Windows уже завершается. Не запускаем финализацию Python/Qt:
+        # в этот момент конструкторы/деструкторы PySide6 могут вывести
+        # traceback или показать системный диалог об ошибке. Настройки уже
+        # сохранены, а завершить процесс можно сразу.
+        os._exit(0)
+    return rc
 
 
 if __name__ == "__main__":
