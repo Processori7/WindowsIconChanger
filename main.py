@@ -37,11 +37,32 @@ from PySide6.QtWidgets import (QApplication, QWidget, QLabel, QPushButton, QChec
                                QGraphicsDropShadowEffect, QSizePolicy, QStyle, QComboBox)
 
 try:
+    # comtypes держит сгенерированные обёртки typelib в файловом кэше. После
+    # обновления Windows кэш может разойтись с UIAutomationCore.dll — отсюда
+    # «Typelib different than module». Генерируем обёртки в памяти: без файлов
+    # и без рассинхронизации с текущей версией библиотеки.
+    try:
+        import comtypes.client
+        comtypes.client.gen_dir = None
+    except Exception:
+        pass
+
     import uiautomation as auto
+
+    # uiautomation по умолчанию создаёт @AutomationLog.txt в текущей папке,
+    # даже когда журнал приложения выключен. Полностью отключаем его вывод.
+    try:
+        auto.Logger.SetLogFile("")
+        auto.Logger.Write = staticmethod(lambda *args, **kwargs: None)
+    except Exception:
+        pass
+
     _HAS_UIA = True
 except Exception:
     auto = None
     _HAS_UIA = False
+
+_UIA_ERRORS = 0          # сколько раз UIAutomation отказала (на весь процесс)
 
 APP_NAME = "IconsPo"
 APP_TITLE = "WinIcons"
@@ -617,7 +638,11 @@ class StartLocator:
             return QRect(int(r.left), int(r.top), w, h), bool(btn.IsOffscreen)
         except Exception as ex:
             # UIAutomation недоступна (например, в сборке нет comtypes) —
-            # после нескольких попыток переходим на эвристику, без спама
+            # после нескольких попыток навсегда переходим на эвристику.
+            global _UIA_ERRORS, _HAS_UIA
+            _UIA_ERRORS += 1
+            if _UIA_ERRORS >= 3:
+                _HAS_UIA = False
             self._btns[hwnd] = None
             self._fails[hwnd] = self._fails.get(hwnd, 0) + 1
             self.last_error = f"{type(ex).__name__}: {ex}"[:200]
